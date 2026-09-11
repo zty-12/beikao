@@ -948,7 +948,7 @@ function def(){
   /* 新增：艾宾浩斯复习调度池（独立 key，不影响老数据）
      pool: { 'w:<错题id>' | 'r:<背诵id>' : {stage,next,last,type,refId,subject,text} } */
   eb:{pool:{},enabled:true},
-  cloud:{supabaseUrl:'',supabaseKey:'',autoSync:true,lastSync:0,kbqaUrl:'',aiUrl:'',aiKey:'',aiModel:''}
+  cloud:{supabaseUrl:'',supabaseKey:'',autoSync:true,lastSync:0,kbqaUrl:'',aiUrl:'',aiKey:'',aiModel:'',ocrWorkers:3}
  };
 }
 function load(){try{const r=localStorage.getItem(LS_KEY);if(r){const d=JSON.parse(r);const b=def();return Object.assign(b,d,{exam:Object.assign(b.exam,d.exam||{}),stats:Object.assign(b.stats,d.stats||{}),planner:Object.assign(b.planner,d.planner||{}),progress:Object.assign(b.progress,d.progress||{}),focus:Object.assign(b.focus,d.focus||{}),kb:Object.assign(b.kb,d.kb||{}),eb:Object.assign(b.eb,d.eb||{},{pool:(d.eb&&d.eb.pool)||{}}),cloud:Object.assign(b.cloud,d.cloud||{})});}}catch(e){}return def();}
@@ -1502,16 +1502,37 @@ async function extractPdfText(file,ocrBox,ocrText){
   const box=ocrBox||$('#ocrBox'),tx=ocrText||$('#ocrText');box.style.display='block';
   let ocrTxt='';
   const maxPages=Math.min(pdf.numPages,40);
+  /* 渲染倍率 2 → 1.5：像素量减少约 44%，中文识别精度几乎无损（想更准可改回 2） */
+  const SCALE=1.5;
+  /* 并发 worker 数：1 / 3 / 5（设置里可调），默认 3 */
+  const WN=Math.min([1,3,5].indexOf(Number(S.cloud.ocrWorkers))>=0?Number(S.cloud.ocrWorkers):3,maxPages);
   try{
-   for(let i=1;i<=maxPages;i++){
-    tx.textContent='OCR 识别第 '+i+'/'+maxPages+' 页（首次需下载中文模型约10MB）…';
-    const page=await pdf.getPage(i);
-    const viewport=page.getViewport({scale:2});
-    const canvas=document.createElement('canvas');canvas.width=viewport.width;canvas.height=viewport.height;
-    try{await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;}catch(e){continue;}
-    const res=await window.Tesseract.recognize(canvas.toDataURL('image/png'),'chi_sim',{logger:m=>{if(m.status==='recognizing text')tx.textContent='第 '+i+' 页识别中 '+Math.round(m.progress*100)+'%…';}});
-    ocrTxt+=(res.data.text||'')+'\n';
-   }
+   /* 常驻 worker 池：只初始化一次，避免每页重建（提速最大的一步） */
+   tx.textContent='正在启动 OCR 引擎 '+WN+' 个（首次需下载中文模型约10MB）…';
+   const workers=[];
+   for(let w=0;w<WN;w++)workers.push(await window.Tesseract.createWorker('chi_sim',1,{logger:function(m){}}));
+   const results=new Array(maxPages).fill('');
+   let cursor=0,done=0;
+   await Promise.all(workers.map(async function(worker){
+    for(;;){
+     const idx=cursor++;if(idx>=maxPages)break;
+     try{
+      const page=await pdf.getPage(idx+1);
+      const viewport=page.getViewport({scale:SCALE});
+      const canvas=document.createElement('canvas');
+      canvas.width=Math.floor(viewport.width);canvas.height=Math.floor(viewport.height);
+      try{await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;}catch(e){canvas.width=canvas.height=0;done++;continue;}
+      /* 直接传 canvas，省掉 toDataURL 的巨大 base64 编解码开销 */
+      const res=await worker.recognize(canvas);
+      results[idx]=(res&&res.data&&res.data.text)||'';
+      canvas.width=canvas.height=0;   /* 及时释放，避免多页 canvas 堆积占内存 */
+     }catch(e){results[idx]='';}
+     done++;
+     tx.textContent='OCR 识别中 '+done+'/'+maxPages+' 页…';
+    }
+   }));
+   for(let w=0;w<workers.length;w++){try{await workers[w].terminate();}catch(e){}}
+   ocrTxt=results.join('\n');
   }catch(e){/* OCR 中断则用已有部分 */}
   box.style.display='none';
   if(ocrTxt.trim())return ocrTxt;
@@ -2162,6 +2183,15 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
  </div>
  <p class="sync-status" id="syncStatus">尚未同步。建表 SQL：create table beikao_workbench(id text primary key,data jsonb,updated_at timestamptz default now());</p>
  <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
+ <div class="panel-head">🔍 图片型 PDF 识别速度</div>
+ <label class="lbl">OCR 并发数</label>
+ <select class="inp" id="sbOcr">
+  <option value="1" ${S.cloud.ocrWorkers==1?'selected':''}>1 档 · 最省内存（识别慢）</option>
+  <option value="3" ${S.cloud.ocrWorkers==3?'selected':''}>3 档 · 均衡（推荐）</option>
+  <option value="5" ${S.cloud.ocrWorkers==5?'selected':''}>5 档 · 最快（较吃内存）</option>
+ </select>
+ <p class="hint" style="margin:8px 0 0">同时开几个识别进程处理扫描版 PDF。页数多、电脑配置好可选 5 档；老电脑或内存小建议 1 档。</p>
+ <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
  <div class="panel-head">🤖 AI 自动提炼知识点</div>
  <div class="soft-box" style="font-size:12.5px;margin-bottom:8px">⚠️ sensnova 不开放网页直连（会报 CORS / fetch failed）。请<b>先在本地运行中转到代理</b>，再填地址。详见下方「使用说明」。</div>
  <label class="lbl">API 地址（本地代理 / 或支持直连的兼容服务）</label><input class="inp" id="aiUrl" value="${esc(S.cloud.aiUrl)}" placeholder="http://127.0.0.1:8787/v1">
@@ -2176,7 +2206,7 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
  <div class="m-actions"><button class="btn primary" id="setSave">保存设置</button><button class="btn ghost" id="setExport">📤 导出备份</button><button class="btn ghost" id="setImport">📥 导入备份</button></div>
  <input type="file" id="setImportFile" accept=".json" style="display:none">
  <div class="m-actions"><button class="btn danger" id="setReset" style="flex:1">恢复初始工作台</button></div>`);
- $('#setSave').onclick=()=>{S.exam.name=$('#setExamName').value.trim()||S.exam.name;S.exam.date=$('#setExamDate').value||S.exam.date;S.cloud.supabaseUrl=$('#sbUrl').value.trim();S.cloud.supabaseKey=$('#sbKey').value.trim();S.cloud.autoSync=$('#sbAuto').checked;S.cloud.aiUrl=$('#aiUrl').value.trim();S.cloud.aiKey=$('#aiKey').value.trim();S.cloud.aiModel=$('#aiModel').value.trim();closeModal();save();renderCountdown();toast('设置已保存');};
+ $('#setSave').onclick=()=>{S.exam.name=$('#setExamName').value.trim()||S.exam.name;S.exam.date=$('#setExamDate').value||S.exam.date;S.cloud.supabaseUrl=$('#sbUrl').value.trim();S.cloud.supabaseKey=$('#sbKey').value.trim();S.cloud.autoSync=$('#sbAuto').checked;S.cloud.aiUrl=$('#aiUrl').value.trim();S.cloud.aiKey=$('#aiKey').value.trim();S.cloud.aiModel=$('#aiModel').value.trim();S.cloud.ocrWorkers=Number($('#sbOcr').value)||3;closeModal();save();renderCountdown();toast('设置已保存');};
  $('#aiTest').onclick=async()=>{S.cloud.aiUrl=$('#aiUrl').value.trim();S.cloud.aiKey=$('#aiKey').value.trim();S.cloud.aiModel=$('#aiModel').value.trim();const st=$('#aiStatus');st.textContent='⏳ 正在测试 AI 连接…';const r=await aiExtractKnowledge('请用一句话回复：测试连接成功','',true);st.textContent=r.ok?'✅ AI 连接成功，模型可正常调用':'❌ '+r.msg;};
  $('#aiHelp').onclick=()=>{openModal(`<div class="m-title">🤖 AI 自动提炼知识点（含本地代理）</div><div class="soft-box" style="white-space:pre-line">【为什么报 CORS / fetch failed】
 sensnova 服务端不开放网页直接跨域调用，浏览器出于安全会拦截
