@@ -544,7 +544,7 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
       <div id="zoneCfg" data-page-node-id="chFaqH83HT1zlVg0TtgaFF"></div>
       <div class="btn-row" data-page-node-id="IHUVZkGxvgiO5kadkPxEOd">
         <button class="btn primary" id="plGen" data-page-node-id="31SVURMwHcMRo5PVLI1YcO">🚀 生成计划（月→周→日）</button>
-        <button class="btn ghost" id="plImportKb" data-page-node-id="LaAoWRbaul7n4fogwDMoDQ">从题库导入科目知识点</button>
+        <button class="btn ghost" id="plImportKb" data-page-node-id="LaAoWRbaul7n4fogwDMoDQ">📚 从资料库导入科目知识点</button>
       </div>
       <div class="btn-row" data-page-node-id="QkGQNJmhtmbeSpSNFGhHzZ">
         <button class="btn sm ghost" id="plImportFile" data-page-node-id="kScCYX1z5U1W7k3nFlWW12">📄 导入计划文件</button>
@@ -614,6 +614,7 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
             <button class="btn sm ghost" id="importBtn">📄 导入资料</button>
             <input type="file" id="importFile" accept=".pdf,.txt,.doc,.docx" style="display:none">
             <button class="btn sm ghost" id="importSample">示例资料</button>
+            <button class="btn sm ghost" id="bankManage">🗑 管理题目（批量删除）</button>
           </div>
           <div style="border-top:1.5px dashed #D8E8DA;margin:10px 0 8px"></div>
           <button class="btn sm primary" id="aiExtractBtn" style="width:100%">🤖 AI 自动提炼知识点</button>
@@ -637,6 +638,7 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
               <button class="btn sm ghost" id="qPrev">← 上一题</button>
               <span class="cnt" id="qCnt"></span>
               <button class="btn sm ghost" id="qNext">下一题 →</button>
+              <button class="btn sm ghost" id="qDel" title="删除本题">🗑</button>
             </div>
             <div class="btn-row" id="qBlankRow">
               <button class="btn sm" id="qShowAns">显示答案</button>
@@ -1398,7 +1400,15 @@ $('#plApplyToday').onclick=()=>{const t=today();const d=S.planner.plan.find(x=>x
  S.sections=[{id:u(),title:d.isRest?'🌸 休息日学习计划（'+d.tasks.length+'项）':'📚 工作日学习计划（'+d.tasks.length+'项）',tasks:d.tasks}];
  save();renderTasks();renderLogTiles();renderStats();toast('今日任务已同步到首页（与计划页数据联动）');};
 $('#plRefresh').onclick=()=>{const r=carryOver();toast(r?'已顺延未完成任务':'今日无需调整，计划正常');renderPlanner();};
-$('#plImportKb').onclick=()=>{const subs=[...new Set(S.kb.questions.map(q=>q.subject))];if(!subs.length){toast('题库为空，请先导入资料');return;}let v=$('#plSubjects').value;const existing=parsePoints(v).map(p=>p.subject);subs.forEach(s=>{if(!existing.includes(s))v+=(v?'\n':'')+s+'：';});$('#plSubjects').value=v;toast('已从题库导入科目（含知识点请继续补充或导入计划文件）');};
+$('#plImportKb').onclick=()=>{/* 从资料库（知识点为主 + 题目补充）生成 科目：知识点1,知识点2 配置 */
+ const map=new Map();
+ S.kb.knowledge.forEach(k=>{if(!k.subject)return;if(!map.has(k.subject))map.set(k.subject,new Set());if(k.point&&k.point!=='其他')map.get(k.subject).add(k.point.split('·')[0]);});
+ S.kb.questions.forEach(q=>{if(!q.subject)return;if(!map.has(q.subject))map.set(q.subject,new Set());if(q.point&&q.point!=='其他')map.get(q.subject).add(q.point.split('·')[0]);});
+ const subs=[...map.keys()];
+ if(!subs.length){toast('资料库为空，请先在资料库导入资料');return;}
+ const v=subs.map(s=>s+'：'+[...map.get(s)].join('，')).join('\n');
+ $('#plSubjects').value=v;save();
+ toast('已从资料库导入 '+subs.length+' 个科目、'+subs.reduce((a,s)=>a+map.get(s).size,0)+' 个知识点，可微调后生成计划');};
 $('#plExportFile').onclick=()=>{const cfg=S.planner.config;let txt=(cfg.subjects||'')+'\n周期开始：'+cfg.periodStart+'\n周期结束：'+cfg.periodEnd;(cfg.zones||[]).forEach(z=>{txt+='\n分区：'+z.name.replace(/^\S+\s/,'')+'\n'+z.name.replace(/^\S+\s/,'')+'执行：'+(z.days==='both'?'工作日+休息日':z.days==='work'?'工作日':'休息日')+'\n'+z.name.replace(/^\S+\s/,'')+'时长：'+z.hours;});const blob=new Blob([txt],{type:'text/plain;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='备考计划配置-'+today()+'.txt';a.click();toast('计划配置已导出');};
 $('#plImportFile').onclick=()=>$('#plImportInput').click();
 $('#plImportInput').onchange=async e=>{const f=e.target.files[0];if(!f)return;toast('正在解析计划文件…');try{const txt=await parseImportFile(f);parsePlanFileText(txt);genPlan();toast('✅ 计划文件解析成功，已按文件内容生成计划');}catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,40));}e.target.value='';};
@@ -1503,7 +1513,7 @@ async function extractPdfText(file,ocrBox,ocrText){
   const okT=await ensureTesseract();if(!okT)throw new Error('图片型 PDF 需 OCR，但 OCR 引擎加载失败，请检查网络');
   const box=ocrBox||$('#ocrBox'),tx=ocrText||$('#ocrText');box.style.display='block';
   let ocrTxt='';
-  const maxPages=Math.min(pdf.numPages,40);
+  const maxPages=Math.min(pdf.numPages,300);
   /* 渲染倍率 2 → 1.5：像素量减少约 44%，中文识别精度几乎无损（想更准可改回 2） */
   const SCALE=1.5;
   /* 并发 worker 数：1 / 3 / 5（设置里可调），默认 3 */
@@ -1615,16 +1625,19 @@ function aiSampleData(){
 function classify(text){const map=[['高等数学',/微积分|导数|积分|极限|矩阵|函数|线性/],['流体力学',/流体|雷诺|伯努利|压强|层流|湍流|管道|流速/],['环境工程微生物',/微生物|细菌|菌|活性污泥|生物处理/],['环境监测与分析',/监测|采样|分析|水质|COD|BOD|溶解氧|浓度|水污染/],['环境评价与规划',/评价|规划|环评|大气|噪声|环境影响/],['职业法规',/法规|标准|条例|法|规定|办法/]];for(const[s,re]of map){if(re.test(text))return s;}return '综合';}
 /* ---------- 智能识别：一级标题(科目)/二级标题(知识点)/正文/选择题(问题·选项·答案) ---------- */
 function knownSubjects(){const s=parsePoints(S.planner.config.subjects||'').map(x=>x.subject);S.kb.questions.forEach(q=>{if(!s.includes(q.subject))s.push(q.subject);});S.kb.knowledge.forEach(k=>{if(!s.includes(k.subject))s.push(k.subject);});return s;}
-function parseKnowledgeFile(text){
+function parseKnowledgeFile(text,src){
  const subjects=knownSubjects();
+ /* 科目兜底：文件名（去扩展名）作为默认科目，保证章节内容有归属 */
+ const defSubj=((src||'').replace(/\.\w+$/,'').trim())||'综合';
  const out={questions:[],plain:[],knowledge:[]};
- let curSubject=null,curPoint=null,curContent=[];
+ let curSubject=null,curH1=null,curH2=null,curContent=[];
  let pendingQ=null;
+ const curPoint=()=>curH1?(curH2?(curH1+'·'+curH2):curH1):null;
  function flushQ(){
   if(pendingQ&&pendingQ.q){
    const opts=['A','B','C','D'].filter(l=>pendingQ.options[l]).map(l=>pendingQ.options[l]);
    if(pendingQ.answer&&opts.length>=2){
-    out.questions.push({subject:pendingQ.subject||curSubject||'综合',point:pendingQ.point||curPoint||'其他',q:pendingQ.q,options:opts,answer:pendingQ.answer});
+    out.questions.push({subject:pendingQ.subject||curSubject||defSubj,point:pendingQ.point||curPoint()||'其他',q:pendingQ.q,options:opts,answer:pendingQ.answer});
    }else if(pendingQ.q){
     out.plain.push(pendingQ.q);
    }
@@ -1632,29 +1645,43 @@ function parseKnowledgeFile(text){
   pendingQ=null;
  }
  function flushContent(){
-  if(curSubject&&curPoint&&curContent.length){
-   out.knowledge.push({id:u(),subject:curSubject,point:curPoint,content:curContent.join('\n')});
+  const pt=curPoint();
+  if((curSubject||defSubj)&&pt&&curContent.length){
+   out.knowledge.push({id:u(),subject:curSubject||defSubj,point:pt,content:curContent.join('\n')});
    curContent=[];
   }else if(curContent.length){out.plain.push(...curContent);curContent=[];}
  }
  String(text||'').split(/\r?\n/).forEach(raw=>{
   let l=raw.trim();if(!l)return;
+  /* 目录页行（标题……页码）直接跳过 */
+  if(/[…⋯]{2,}/.test(l)&&/\d{1,4}\s*$/.test(l))return;
   const qm=l.match(/^(问题\s*\d*|第\s*\d+\s*题|Q\d*)[.、:：)）]?\s*(.+)$/i);
-  if(qm){flushQ();flushContent();pendingQ={q:qm[2].replace(/[（(]?\s*[）)]?$/,'').trim(),options:{},answer:null,subject:curSubject,point:curPoint};return;}
+  if(qm){flushQ();flushContent();pendingQ={q:qm[2].replace(/[（(]?\s*[）)]?$/,'').trim(),options:{},answer:null,subject:curSubject,point:curPoint()};return;}
   const am=l.match(/^([A-D])[.、:：)）]\s*(.+)$/i);
   if(am&&pendingQ){pendingQ.options[am[1].toUpperCase()]=am[2].trim();return;}
   const ansm=l.match(/^答案[:：]?\s*([A-D1-4])/i);
   if(ansm&&pendingQ){let a=ansm[1].toUpperCase();if(/[1-4]/.test(a))a=['A','B','C','D'][+a-1];pendingQ.answer=a;flushQ();return;}
-  /* 一级标题：匹配已知科目 或 章节标题 */
-  const subjHit=subjects.find(s=>l===s||l.indexOf(s)>-1&&l.length<=12);
-  if(subjHit){flushQ();flushContent();curSubject=subjHit;curPoint=null;return;}
-  if(/^第[一二三四五六七八九十\d]+[章节篇][：: ]/.test(l)){flushQ();flushContent();curSubject=l.replace(/^第[一二三四五六七八九十\d]+[章节篇][：: ]*/,'').trim();curPoint=null;return;}
-  /* 二级标题：数字编号或短行 */
-  const pm=l.match(/^[（(]?\d{1,2}[）)、.．]\s*(.{1,16})$/);
-  if(pm&&!l.includes('。')){flushQ();flushContent();curPoint=pm[1].trim();return;}
-  if(l.length<=16&&!l.includes('。')&&!l.includes('，')&&!/^\d/.test(l)&&!l.endsWith('：')){flushQ();flushContent();curPoint=l;return;}
+  /* 科目标题：命中已知科目名（优先级最高，切到新科目并清空层级） */
+  const subjHit=subjects.find(s=>l===s||(l.indexOf(s)>-1&&l.length<=12));
+  if(subjHit){flushQ();flushContent();curSubject=subjHit;curH1=null;curH2=null;return;}
+  /* 一级标题（目录第一层）：第X章/节/讲/篇 或 一、二、三、 */
+  if(/^(第[一二三四五六七八九十百\d]+[章节篇讲部分])/.test(l)&&l.length<=24&&!l.includes('。')){flushQ();flushContent();curH1=l.replace(/[：:]\s*$/,'').trim();curH2=null;return;}
+  const h1c=l.match(/^([一二三四五六七八九十]{1,3})[、.．]\s*(.{1,20})$/);
+  if(h1c&&!l.includes('。')){flushQ();flushContent();curH1=h1c[2].trim();curH2=null;return;}
+  /* 二级标题（目录第二层）：1.1 多级编号 / 1、 / （一） / （1） ；无一级时自动升为一级 */
+  const h2a=l.match(/^[（(]([一二三四五六七八九十]{1,3})[）)]\s*(.{1,20})$/);
+  const h2b=l.match(/^\d{1,2}(?:[.、．]\d{1,2})+\s*(.{1,20})$/);
+  const h2c=l.match(/^\d{1,2}[）)、.．](?!\d)\s*(.{1,20})$/);
+  if((h2a||h2b||h2c)&&!l.includes('。')){
+   const title=(h2a?h2a[2]:h2b?h2b[1]:h2c[1]).trim();
+   flushQ();flushContent();
+   if(curH1)curH2=title;else curH1=title;
+   return;
+  }
+  /* 短行无标点视为小标题：有一级时作二级，否则作一级 */
+  if(l.length<=16&&!l.includes('。')&&!l.includes('，')&&!/^\d/.test(l)&&!l.endsWith('：')){flushQ();flushContent();if(curH1)curH2=l;else curH1=l;return;}
   /* 正文 */
-  if(curSubject&&curPoint)curContent.push(l);
+  if(curSubject||curH1)curContent.push(l);
   else out.plain.push(l);
  });
  flushQ();flushContent();
@@ -1663,7 +1690,7 @@ function parseKnowledgeFile(text){
 }
 function blankIt(sent){const m=sent.match(/[\u4e00-\u9fa5]{2,10}/g);if(!m)return null;m.sort((a,b)=>b.length-a.length);const w=m[0];return{q:sent.replace(w,'____'),a:w};}
 function genQuestions(text,src){
- const parsed=parseKnowledgeFile(text);
+ const parsed=parseKnowledgeFile(text,src);
  let n=0;
  parsed.questions.forEach(q=>{S.kb.questions.unshift({id:u(),subject:q.subject,point:q.point,q:q.q,options:q.options,answer:q.answer,source:src||'导入',type:'choice'});n++;});
  /* 剩余正文句子生成填空 */
@@ -1676,7 +1703,7 @@ function genQuestions(text,src){
 /* ---------- 资料库专用：只存知识点文字资料，不生成题目 ---------- */
 function importKnowledgeOnly(text,src){
  const before=S.kb.knowledge.length;
- const parsed=parseKnowledgeFile(text);   /* 结构化知识点在 parse 内部已并入 S.kb.knowledge */
+ const parsed=parseKnowledgeFile(text,src);   /* 结构化知识点在 parse 内部已并入 S.kb.knowledge */
  let n=S.kb.knowledge.length-before;
  /* 无标题结构的零散正文：整段归入一个知识点（按内容自动分类），绝不生成题目 */
  if(parsed.plain.length){
@@ -1789,7 +1816,7 @@ function renderBank(){
  if(!list.length){$('#qCard').style.display='none';$('#qEmpty').style.display='block';return;}
  $('#qEmpty').style.display='none';$('#qCard').style.display='block';
  const q=list[Math.min(bankIdx,list.length-1)];
- $('#qText').textContent='【'+q.subject+(q.point&&q.point!=='其他'?' · '+q.point:'')+'】 '+(q.type==='choice'?q.q:'');
+ $('#qText').textContent='【'+q.subject+(q.point&&q.point!=='其他'?' · '+q.point:'')+'】 '+(q.q||'（该题缺题干，可在「🗑 管理」中删除）');
  $('#qAns').classList.remove('show');
  $('#qCnt').textContent=(Math.min(bankIdx,list.length-1)+1)+' / '+list.length;
  $('#qPrev').style.visibility=bankIdx<=0?'hidden':'visible';
@@ -1809,9 +1836,9 @@ function renderBank(){
    });
    let html;
    const tag=('【'+q.subject+' · '+((q.point&&q.point!=='其他')?q.point:'选择题')+'】');
-   if(right)html='✅ 回答正确！ '+tag+' 答案：'+qAns+'. '+q.options[correctIdx];
-   else html='❌ 你的答案：'+userLetter+'. '+q.options['ABCD'.indexOf(userLetter)]+'　｜　正确答案：'+(qAns||'缺失')+'. '+(q.options[correctIdx]||'（原数据未记录答案）')+'　'+tag;
-   $('#qAns').textContent=html;
+   if(right)html='✅ 回答正确！ '+tag+' 答案：'+qAns+'. '+esc(q.options[correctIdx]);
+   else html='❌ 你的答案：'+userLetter+'. '+esc(q.options['ABCD'.indexOf(userLetter)]||'')+'　｜　正确答案：'+(qAns||'缺失')+'. '+esc(q.options[correctIdx]||'（原数据未记录答案）')+'　'+tag;
+   $('#qAns').innerHTML=html+relatedKnowledgeHTML(q);
    $('#qAns').classList.add('show');
   };
   $$('#qOpts .opt-btn').forEach(b=>b.onclick=()=>{
@@ -1838,12 +1865,33 @@ function renderBank(){
  }else{
   $('#qOpts').style.display='none';
   $('#qBlankRow').style.display='flex';
-  $('#qAns').textContent='正确答案：'+q.a;
+  $('#qAns').innerHTML='正确答案：'+esc(q.a||'')+relatedKnowledgeHTML(q);
  }
 }
 function nextQ(){const l=bankList();if(bankIdx<l.length-1){bankIdx++;renderBank();}else toast('已是最后一题');}
+/* 答案解析关联资料库：优先匹配同科目同知识点，其次同科目（最多2条） */
+function relatedKnowledgeHTML(q){
+ if(!q)return'';
+ let ks=S.kb.knowledge.filter(k=>k.subject===q.subject&&q.point&&k.point&&(k.point===q.point||k.point.indexOf(q.point)>-1||q.point.indexOf(k.point)>-1));
+ if(!ks.length)ks=S.kb.knowledge.filter(k=>k.subject===q.subject);
+ if(!ks.length)return'';
+ return '<br><span style="color:#4E8A62;font-weight:700">📖 资料库解析：</span>'+ks.slice(0,2).map(k=>'<br>· <b>'+esc(k.point||'')+'</b>：'+esc((k.content||'').length>150?(k.content||'').slice(0,150)+'…':(k.content||''))).join('');
+}
 $('#qPrev').onclick=()=>{if(bankIdx>0){bankIdx--;renderBank();}};
 $('#qNext').onclick=nextQ;
+/* 单题删除：删完停在原位（越界自动回退） */
+$('#qDel').onclick=()=>{const q=curQ();if(!q)return;if(!confirm('确认删除当前题目？'))return;S.kb.questions=S.kb.questions.filter(x=>x.id!==q.id);if(bankIdx>=bankList().length)bankIdx=Math.max(0,bankList().length-1);save();renderKBAll();toast('题目已删除');};
+/* 批量管理：按当前筛选列出题目，勾选批量删除 */
+$('#bankManage').onclick=()=>{
+ const list=bankList();
+ if(!list.length){toast('当前筛选下没有题目');return;}
+ openModal(`<div class="m-title">🗑 管理题目（${esc(bankFilter)} · ${list.length} 题）</div>
+  <div style="max-height:50vh;overflow:auto">${list.map(q=>`<div class="kb-row"><input type="checkbox" class="q-bulk" data-bq="${q.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">${esc((q.type==='choice'?'[选择] ':'[填空] ')+(q.q||q.a||'(无题干)'))}</div></div></div>`).join('')}</div>
+  <div class="m-actions" style="align-items:center"><button class="btn sm danger" id="qBulkDel">🗑 删除选中</button><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer"><input type="checkbox" id="qSelAll" style="width:18px;height:18px;accent-color:#2F5D4C">全选</label><button class="btn primary" style="flex:1" id="qBulkClose">关闭</button></div>`);
+ $('#qSelAll').onchange=()=>{$$('#modalOverlay .q-bulk').forEach(c=>c.checked=$('#qSelAll').checked);};
+ $('#qBulkDel').onclick=()=>{const ids=$$('#modalOverlay .q-bulk').filter(c=>c.checked).map(c=>c.dataset.bq);if(!ids.length){toast('先勾选要删除的题目');return;}if(!confirm('确认删除选中的 '+ids.length+' 道题？此操作不可恢复。'))return;S.kb.questions=S.kb.questions.filter(q=>!ids.includes(q.id));if(bankIdx>=bankList().length)bankIdx=0;save();closeModal();renderKBAll();toast('已删除 '+ids.length+' 道题');};
+ $('#qBulkClose').onclick=closeModal;
+};
 $('#qShowAns').onclick=()=>$('#qAns').classList.add('show');
 $('#qRight').onclick=()=>{toast('答对了，继续保持！');nextQ();};
 $('#qWrong').onclick=()=>wrongFlow(curQ());
