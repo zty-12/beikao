@@ -588,8 +588,10 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
           <input class="inp" id="matSearch" placeholder="搜索科目 / 知识点 / 视频…">
         </div>
         <div class="sub-title" style="margin-top:12px">📁 文件资料区（科目 → 知识点 分级文件夹）</div>
+        <div id="fSubjBar" style="display:none;align-items:center;gap:10px;margin:8px 0 0;flex-wrap:wrap"><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer"><input type="checkbox" id="fSubjSelAll" style="width:18px;height:18px;accent-color:#2F5D4C">全选科目</label><button class="btn sm danger" id="fSubjDel">🗑 删除选中科目</button></div>
         <div id="folderTree"></div>
         <div class="sub-title">🎬 视频资料区（文件夹展示 · 全屏旋转 · 倍速）</div>
+        <div id="vSubjBar" style="display:none;align-items:center;gap:10px;margin:8px 0 0;flex-wrap:wrap"><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer"><input type="checkbox" id="vSubjSelAll" style="width:18px;height:18px;accent-color:#2F5D4C">全选科目</label><button class="btn sm danger" id="vSubjDel">🗑 删除选中科目</button></div>
         <div id="videoTree"></div>
       </div>
     </div>
@@ -1945,6 +1947,35 @@ function renderWrong(){
 $('#wrongToPlan').onclick=()=>{const stat={};S.kb.wrongs.forEach(w=>stat[w.subject]=(stat[w.subject]||0)+1);const top=Object.entries(stat).sort((a,b)=>b[1]-a[1])[0];if(!top){toast('暂无错题数据');return;}S.weeklyPlan='下周增加【'+top[0]+'】错题专项重做，每日 30 分钟。';save();renderReview();toast('已加入下周计划');};
 /* ---------- 资料库：文件资料文件夹 + 视频文件夹 ---------- */
 function matKeyword(){return ($('#matSearch')?$('#matSearch').value:'').trim();}
+/* 整个科目大文件夹删除：题目 + 知识点 + 错题 + 从学习计划配置移除（避免重建） */
+function deleteSubjects(list){
+ const subs=[...new Set((list||[]).filter(Boolean))];
+ if(!subs.length)return;
+ let q=0,k=0,w=0;
+ subs.forEach(s=>{q+=S.kb.questions.filter(x=>x.subject===s).length;k+=S.kb.knowledge.filter(x=>x.subject===s).length;w+=(S.kb.wrongs||[]).filter(x=>x.subject===s).length;});
+ if(!confirm('确认删除科目「'+subs.join('、')+'」？\n将同时删除其下 '+q+' 道题、'+k+' 条知识点'+(w?('、'+w+' 条错题'):'')+'，并从学习计划配置中移除。\n此操作不可恢复。'))return;
+ S.kb.questions=S.kb.questions.filter(x=>!subs.includes(x.subject));
+ S.kb.knowledge=S.kb.knowledge.filter(x=>!subs.includes(x.subject));
+ if(S.kb.wrongs)S.kb.wrongs=S.kb.wrongs.filter(x=>!subs.includes(x.subject));
+ /* 从学习计划科目配置里摘掉，否则文件夹会被重新建出来 */
+ const lines=String(S.planner.config.subjects||'').split(/[\n;；]/);
+ S.planner.config.subjects=lines.filter(l=>{const m=l.match(/^([^:：]{1,20})[:：]/);return !(m&&subs.includes(m[1].trim()));}).join('\n');
+ subs.forEach(s=>{delete S.kb.folderState[s];});
+ save();renderFolder();renderBank();renderWrong();try{renderTasks();}catch(e){}
+ toast('已删除 '+subs.length+' 个科目（'+q+' 道题、'+k+' 条知识点）');
+}
+/* 视频科目大文件夹删除：该科目下全部视频 */
+function deleteVideoSubjects(list){
+ const subs=[...new Set((list||[]).filter(Boolean))];
+ if(!subs.length)return;
+ const vs=S.kb.videos.filter(v=>subs.includes(v.subject));
+ if(!vs.length){toast('选中科目下暂无视频');return;}
+ if(!confirm('确认删除科目「'+subs.join('、')+'」下的 '+vs.length+' 个视频？\n此操作不可恢复。'))return;
+ vs.forEach(v=>{try{if(v.obUrl)URL.revokeObjectURL(v.obUrl);}catch(e){}});
+ S.kb.videos=S.kb.videos.filter(v=>!subs.includes(v.subject));
+ subs.forEach(s=>{delete S.kb.folderState['v:'+s];});
+ save();renderVideoTree();toast('已删除 '+vs.length+' 个视频');
+}
 function renderFolder(){
  const qs=S.kb.questions;
  const kw=matKeyword();
@@ -1954,7 +1985,8 @@ function renderFolder(){
   const pts=(ptsMap.find(p=>p.subject===s)||{points:[]}).points;
   const items=qs.filter(q=>q.subject===s);
   const collapsed=!S.kb.folderState[s];
-  let h=`<div class="folder-1 ${collapsed?'collapsed':''}" data-fs="${esc(s)}"><span class="arrow">▼</span>📁 ${esc(s)} <span class="hint" style="margin-left:auto">${items.length} 题</span></div>`;
+  const knN=S.kb.knowledge.filter(k=>k.subject===s).length;
+  let h=`<div class="folder-1 ${collapsed?'collapsed':''}" data-fs="${esc(s)}"><input type="checkbox" class="subj-bulk" data-bs="${esc(s)}" title="选择该科目" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><span class="arrow">▼</span>📁 ${esc(s)} <span class="hint" style="margin-left:auto">${items.length} 题 · ${knN} 知识点</span><button class="btn sm danger" data-sdel="${esc(s)}" style="flex:none;padding:3px 8px" title="删除整个科目文件夹">🗑</button></div>`;
   h+=`<div class="folder-2" style="${collapsed?'display:none':''}">`;
   pts.forEach(p=>{const inIt=items.filter(q=>q.q.indexOf(p)>-1);h+=`<div class="folder-2-item" data-subj="${esc(s)}" data-pt="${esc(p)}">📂 ${esc(p)} <span class="hint" style="margin-left:auto">${inIt.length} 题</span></div>`;});
   const others=items.filter(q=>!pts.some(p=>q.q.indexOf(p)>-1));
@@ -1967,6 +1999,14 @@ function renderFolder(){
   $$('#folderTree .folder-2-item').forEach(it=>{it.classList.toggle('hidden',it.textContent.indexOf(kw)<0);});
  }
  $$('#folderTree .folder-1').forEach(f=>f.onclick=()=>{const s=f.dataset.fs;const n=f.nextElementSibling;const show=n.style.display!=='none';if(show){n.style.display='none';f.classList.add('collapsed');S.kb.folderState[s]=false;}else{n.style.display='block';f.classList.remove('collapsed');S.kb.folderState[s]=true;}save();});
+ /* 科目大文件夹：勾选批量删除 / 单科一键删除 */
+ const fBar=$('#fSubjBar');if(fBar)fBar.style.display=subs.length?'flex':'none';
+ const fSelAll=$('#fSubjSelAll');
+ if(fSelAll)fSelAll.onchange=()=>{$$('#folderTree .subj-bulk').forEach(c=>c.checked=fSelAll.checked);};
+ const fSubjDel=$('#fSubjDel');
+ if(fSubjDel)fSubjDel.onclick=()=>{const list=$$('#folderTree .subj-bulk').filter(c=>c.checked).map(c=>c.dataset.bs);if(!list.length){toast('先勾选要删除的科目');return;}deleteSubjects(list);};
+ $$('#folderTree .subj-bulk').forEach(c=>c.onclick=e=>e.stopPropagation());
+ $$('#folderTree [data-sdel]').forEach(b=>b.onclick=e=>{e.stopPropagation();deleteSubjects([b.dataset.sdel]);});
  $$('#folderTree .folder-2-item').forEach(it=>it.onclick=()=>{
   const subj=it.dataset.subj,pt=it.dataset.pt;
   const pts=(parsePoints(S.planner.config.subjects||'').find(p=>p.subject===subj)||{points:[]}).points;
@@ -2031,7 +2071,7 @@ function renderVideoTree(){
   const pts=(ptsMap.find(p=>p.subject===s)||{points:[]}).points;
   const vsub=vids.filter(v=>v.subject===s);
   const collapsed=!S.kb.folderState['v:'+s];
-  let h=`<div class="folder-1 ${collapsed?'collapsed':''}" data-vfs="${esc(s)}"><span class="arrow">▼</span>🎬 ${esc(s)} <span class="hint" style="margin-left:auto">${vsub.length} 视频</span></div>`;
+  let h=`<div class="folder-1 ${collapsed?'collapsed':''}" data-vfs="${esc(s)}"><input type="checkbox" class="vsubj-bulk" data-vbs="${esc(s)}" title="选择该科目" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><span class="arrow">▼</span>🎬 ${esc(s)} <span class="hint" style="margin-left:auto">${vsub.length} 视频</span><button class="btn sm danger" data-vsdel="${esc(s)}" style="flex:none;padding:3px 8px" title="删除该科目下全部视频">🗑</button></div>`;
   h+=`<div class="folder-2" style="${collapsed?'display:none':''}">`;
   pts.forEach(p=>{
    const vp=vsub.filter(v=>v.point===p);
@@ -2048,6 +2088,14 @@ function renderVideoTree(){
   $$('#videoTree .folder-2-item').forEach(it=>{it.classList.toggle('hidden',it.textContent.indexOf(kw)<0);});
  }
  $$('#videoTree .folder-1').forEach(f=>f.onclick=()=>{const s=f.dataset.vfs;const n=f.nextElementSibling;const show=n.style.display!=='none';if(show){n.style.display='none';f.classList.add('collapsed');S.kb.folderState['v:'+s]=false;}else{n.style.display='block';f.classList.remove('collapsed');S.kb.folderState['v:'+s]=true;}save();});
+ /* 视频科目大文件夹：勾选批量删除 / 单科一键删除 */
+ const vBar=$('#vSubjBar');if(vBar)vBar.style.display=subs.length?'flex':'none';
+ const vSelAll=$('#vSubjSelAll');
+ if(vSelAll)vSelAll.onchange=()=>{$$('#videoTree .vsubj-bulk').forEach(c=>c.checked=vSelAll.checked);};
+ const vSubjDel=$('#vSubjDel');
+ if(vSubjDel)vSubjDel.onclick=()=>{const list=$$('#videoTree .vsubj-bulk').filter(c=>c.checked).map(c=>c.dataset.vbs);if(!list.length){toast('先勾选要删除的科目');return;}deleteVideoSubjects(list);};
+ $$('#videoTree .vsubj-bulk').forEach(c=>c.onclick=e=>e.stopPropagation());
+ $$('#videoTree [data-vsdel]').forEach(b=>b.onclick=e=>{e.stopPropagation();deleteVideoSubjects([b.dataset.vsdel]);});
  $$('#videoTree .folder-2-item').forEach(it=>it.onclick=()=>{
   const subj=it.dataset.vsubj,pt=it.dataset.vpt;
   const pts=(parsePoints(S.planner.config.subjects||'').find(p=>p.subject===subj)||{points:[]}).points;
