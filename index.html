@@ -580,7 +580,7 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
           <button class="btn sm primary" id="matImportBtn">📄 导入文件资料</button>
           <input type="file" id="matImportFile" accept=".pdf,.txt,.doc,.docx" style="display:none">
           <button class="btn sm" id="videoImportBtn">🎬 导入视频资料</button>
-          <input type="file" id="videoFile" accept="video/*" style="display:none">
+          <input type="file" id="videoFile" accept="video/*" multiple style="display:none">
         </div>
         <div class="ocr-progress" id="ocrBox2">🔍 <i id="ocrText2">正在识别…</i></div>
         <div class="search-box">
@@ -1671,6 +1671,21 @@ function genQuestions(text,src){
  if(n)toast('✅ 已识别 '+n+' 道题目（含选择题）与知识点资料');
  else toast('未能从文件中提取到题目，请更换资料');
 }
+/* ---------- 资料库专用：只存知识点文字资料，不生成题目 ---------- */
+function importKnowledgeOnly(text,src){
+ const before=S.kb.knowledge.length;
+ const parsed=parseKnowledgeFile(text);   /* 结构化知识点在 parse 内部已并入 S.kb.knowledge */
+ let n=S.kb.knowledge.length-before;
+ /* 无标题结构的零散正文：整段归入一个知识点（按内容自动分类），绝不生成题目 */
+ if(parsed.plain.length){
+  const subj=classify(parsed.plain.join(' '));
+  const name=(src||'导入资料').replace(/\.\w+$/,'');
+  S.kb.knowledge.push({id:u(),subject:subj,point:name,content:parsed.plain.join('\n')});
+  n++;
+ }
+ save();renderKBAll();
+ toast(n?'✅ 已存入资料库 '+n+' 条知识点（不含题目）':'未提取到知识点文字；若要导入题目，请到「刷题中心」导入');
+}
 /* ---------- 计划文件解析（日期任务 + 配置） ---------- */
 function parsePlanFileText(text){
  const dateTasks=[];
@@ -1777,29 +1792,30 @@ function renderBank(){
  $('#qCnt').textContent=(Math.min(bankIdx,list.length-1)+1)+' / '+list.length;
  $('#qPrev').style.visibility=bankIdx<=0?'hidden':'visible';
  $('#qNext').style.visibility=bankIdx>=list.length-1?'hidden':'visible';
- if(q.type==='choice'){
+ if(q.type==='choice'&&Array.isArray(q.options)&&q.options.length>=2){
   $('#qBlankRow').style.display='none';
   $('#qOpts').style.display='block';
   $('#qOpts').innerHTML=q.options.map((o,i)=>`<button class="opt-btn" data-oi="${i}">${'ABCD'[i]}. ${esc(o)}</button>`).join('');
   /* 即时判题 + 回显解析（参考 exam-prep 效果）：点任意选项即判定，选对标绿，选错标红且正确项标绿 */
-  const correctIdx='ABCD'.indexOf(q.answer);
+  const qAns=(q.answer||'').toString().trim().toUpperCase();
+  const correctIdx=qAns.length===1?'ABCD'.indexOf(qAns):-1;   /* 空/多字符答案一律视为缺失，避免 indexOf('')===0 误标 */
   const answeredFlag={done:false};
   const showFeedback=(userLetter,right)=>{
-   $('#qOpts .opt-btn').forEach((x,i)=>{
+   $$('#qOpts .opt-btn').forEach((x,i)=>{
     if(i===correctIdx)x.classList.add('correct');
     if(i==='ABCD'.indexOf(userLetter)&&!right)x.classList.add('wrong');
    });
    let html;
    const tag=('【'+q.subject+' · '+((q.point&&q.point!=='其他')?q.point:'选择题')+'】');
-   if(right)html='✅ 回答正确！ '+tag+' 答案：'+q.answer+'. '+q.options[correctIdx];
-   else html='❌ 你的答案：'+userLetter+'. '+q.options['ABCD'.indexOf(userLetter)]+'　｜　正确答案：'+q.answer+'. '+q.options[correctIdx]+'　'+tag;
+   if(right)html='✅ 回答正确！ '+tag+' 答案：'+qAns+'. '+q.options[correctIdx];
+   else html='❌ 你的答案：'+userLetter+'. '+q.options['ABCD'.indexOf(userLetter)]+'　｜　正确答案：'+(qAns||'缺失')+'. '+(q.options[correctIdx]||'（原数据未记录答案）')+'　'+tag;
    $('#qAns').textContent=html;
    $('#qAns').classList.add('show');
   };
   $$('#qOpts .opt-btn').forEach(b=>b.onclick=()=>{
    if(answeredFlag.done)return;answeredFlag.done=true;
    const oi=+b.dataset.oi;const letter='ABCD'[oi];
-   const right=letter===q.answer;
+   const right=letter===qAns;
    /* 记录做题结果，供进度条统计 */
    q.done=true;
    if(right){q.doneRight=(q.doneRight||0)+1;q.doneWrong=0;}
@@ -1810,6 +1826,13 @@ function renderBank(){
    if(right){toast('✅ 答对了！');setTimeout(nextQ,800);}
    else{setTimeout(()=>wrongFlow(q),900);}
   });
+ }else if(q.type==='choice'){
+  /* 脏数据防御：choice 题缺选项或选项不是数组时降级展示，不崩、不误判 */
+  $('#qOpts').style.display='none';
+  $('#qOpts').innerHTML='';
+  $('#qBlankRow').style.display='none';
+  $('#qAns').textContent='⚠️ 该题选项数据不完整（原导入数据缺选项），无法作答。参考答案：'+(q.answer||q.a||'未记录');
+  $('#qAns').classList.add('show');
  }else{
   $('#qOpts').style.display='none';
   $('#qBlankRow').style.display='flex';
@@ -1951,12 +1974,27 @@ function renderFolder(){
   const kn=S.kb.knowledge.filter(k=>k.subject===subj&&(pt==='__other__'||k.point===pt));
   if(!items.length&&!kn.length){toast('该文件夹暂无内容');return;}
   let html=`<div class="m-title">📂 ${esc(subj)} / ${esc(pt==='__other__'?'其他':pt)}</div>`;
-  /* 知识点素材：可编辑 / 删除 */
-  if(kn.length)html+=`<div class="sub-title">🧠 知识点（${kn.length}）</div>`+kn.map(k=>`<div class="kb-row"><div class="kb-main"><div class="kb-title">${esc(k.content)}</div></div><button class="btn sm ghost" data-kedit="${k.id}">✏️</button><button class="btn sm danger" data-kdel="${k.id}">🗑</button></div>`).join('');
-  /* 题目：可编辑 / 删除 / 收藏 */
-  if(items.length)html+=`<div class="sub-title">📄 题目（${items.length}）</div>`+items.map(q=>`<div class="kb-row"><div class="kb-main"><div class="kb-title">${esc(q.q)}</div><div class="kb-sub">${q.type==='choice'?('答案：'+q.answer):('答案：'+esc(q.a))}</div></div><button class="btn sm ghost" data-fav2="${q.id}">${q.fav?'⭐':'☆'}</button><button class="btn sm ghost" data-qedit="${q.id}">✏️</button><button class="btn sm danger" data-qdel="${q.id}">🗑</button></div>`).join('');
-  html+=`<div class="m-actions"><button class="btn primary" style="flex:1" id="fClose">关闭</button></div>`;
+  /* 知识点素材：可勾选批量删除 / 单条编辑 / 删除 */
+  if(kn.length)html+=`<div class="sub-title">🧠 知识点（${kn.length}）</div>`+kn.map(k=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bk="${k.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">${esc(k.content)}</div></div><button class="btn sm ghost" data-kedit="${k.id}">✏️</button><button class="btn sm danger" data-kdel="${k.id}">🗑</button></div>`).join('');
+  /* 题目：可勾选批量删除 / 编辑 / 删除 / 收藏 */
+  if(items.length)html+=`<div class="sub-title">📄 题目（${items.length}）</div>`+items.map(q=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bq="${q.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">${esc(q.q)}</div><div class="kb-sub">${q.type==='choice'?('答案：'+esc(q.answer||'')):('答案：'+esc(q.a))}</div></div><button class="btn sm ghost" data-fav2="${q.id}">${q.fav?'⭐':'☆'}</button><button class="btn sm ghost" data-qedit="${q.id}">✏️</button><button class="btn sm danger" data-qdel="${q.id}">🗑</button></div>`).join('');
+  if(kn.length||items.length)html+=`<div class="m-actions" style="align-items:center"><button class="btn sm danger" id="fBulkDel">🗑 删除选中</button><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer"><input type="checkbox" id="fSelAll" style="width:18px;height:18px;accent-color:#2F5D4C">全选</label><button class="btn primary" style="flex:1" id="fClose">关闭</button></div>`;
+  else html+=`<div class="m-actions"><button class="btn primary" style="flex:1" id="fClose">关闭</button></div>`;
   openModal(html);
+  /* 批量删除：勾选题目 / 知识点后一次删除 */
+  const selAll=$('#fSelAll');
+  if(selAll)selAll.onchange=()=>{$$('#modalOverlay .kb-bulk').forEach(c=>c.checked=selAll.checked);};
+  const bulkBtn=$('#fBulkDel');
+  if(bulkBtn)bulkBtn.onclick=()=>{
+   const boxes=$$('#modalOverlay .kb-bulk').filter(c=>c.checked);
+   if(!boxes.length){toast('先勾选要删除的内容');return;}
+   const qids=boxes.map(c=>c.dataset.bq).filter(Boolean);
+   const kids=boxes.map(c=>c.dataset.bk).filter(Boolean);
+   if(!confirm('确认删除选中的 '+qids.length+' 道题、'+kids.length+' 条知识点？此操作不可恢复。'))return;
+   S.kb.questions=S.kb.questions.filter(q=>!qids.includes(q.id));
+   S.kb.knowledge=S.kb.knowledge.filter(k=>!kids.includes(k.id));
+   save();closeModal();renderFolder();renderBank();renderWrong();toast('已删除 '+qids.length+' 道题、'+kids.length+' 条知识点');
+  };
   /* 题目收藏 */
   $$('#modalOverlay [data-fav2]').forEach(b=>b.onclick=()=>{const q=S.kb.questions.find(x=>x.id===b.dataset.fav2);if(q){q.fav=!q.fav;save();b.textContent=q.fav?'⭐':'☆';}});
   /* 题目编辑 */
@@ -2015,39 +2053,54 @@ function renderVideoTree(){
   const pts=(parsePoints(S.planner.config.subjects||'').find(p=>p.subject===subj)||{points:[]}).points;
   const vlist=vids.filter(v=>v.subject===subj&&(pt==='__other__'?!pts.some(p=>v.point===p):v.point===pt));
   if(!vlist.length){toast('该文件夹暂无视频');return;}
-  /* 文件夹内单行视频名+进度 */
+  /* 文件夹内单行视频名+进度，支持勾选批量删除 */
   openModal(`<div class="m-title">🎬 ${esc(subj)} / ${esc(pt==='__other__'?'其他':pt)}</div>
-   ${vlist.map(v=>`<div class="video-line" data-vplay="${v.id}"><span class="vl-ico">🎬</span><span class="vl-name">${esc(v.name)}</span><span class="vl-prog">${v.progress}%</span><button class="btn sm ghost" data-vdel="${v.id}" style="flex:none">🗑</button></div>`).join('')}
+   ${vlist.map(v=>`<div class="video-line" data-vplay="${v.id}"><input type="checkbox" class="v-bulk" data-bv="${v.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><span class="vl-ico">🎬</span><span class="vl-name">${esc(v.name)}</span><span class="vl-prog">${v.progress}%</span><button class="btn sm ghost" data-vdel="${v.id}" style="flex:none">🗑</button></div>`).join('')}
+   <div class="m-actions" style="align-items:center"><button class="btn sm danger" id="vBulkDel">🗑 删除选中</button><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer"><input type="checkbox" id="vSelAll" style="width:18px;height:18px;accent-color:#2F5D4C">全选</label></div>
    <p class="hint" style="margin-top:8px">👆 点击视频名称查看详情；🗑 删除该视频资料。</p>`);
+  /* 批量删除视频（勾选不影响点击行播放） */
+  const vsel=$('#vSelAll');if(vsel)vsel.onchange=()=>{$$('#modalOverlay .v-bulk').forEach(c=>c.checked=vsel.checked);};
+  $$('#modalOverlay .v-bulk').forEach(c=>c.onclick=e2=>e2.stopPropagation());
+  $('#vBulkDel').onclick=()=>{const ids=$$('#modalOverlay .v-bulk').filter(c=>c.checked).map(c=>c.dataset.bv);if(!ids.length){toast('先勾选要删除的视频');return;}if(!confirm('确认删除选中的 '+ids.length+' 个视频？此操作不可恢复。'))return;S.kb.videos=S.kb.videos.filter(v=>!ids.includes(v.id));save();closeModal();renderVideoTree();toast('已删除 '+ids.length+' 个视频');};
   $$('#modalOverlay [data-vplay]').forEach(b=>b.onclick=()=>{closeModal();setTimeout(()=>playVideo(S.kb.videos.find(v=>v.id===b.dataset.vplay)),50);});
   $$('#modalOverlay [data-vdel]').forEach(b=>b.onclick=(e)=>{e.stopPropagation();const v=S.kb.videos.find(x=>x.id===b.dataset.vdel);if(!v)return;if(!confirm('确认删除视频「'+v.name+'」？'))return;S.kb.videos=S.kb.videos.filter(x=>x.id!==v.id);save();closeModal();renderVideoTree();toast('视频资料已删除');});
  });
 }
 function checkVideoTaskDone(){let changed=false;S.kb.videos.forEach(v=>{if(v.progress>=100&&v.point){allTasks().forEach(t=>{if(t.subject===v.subject&&t.name&&t.name.indexOf(v.point)>-1&&!t.done){t.done=true;changed=true;}});}});if(changed){save();renderTasks();renderProgress();renderStats();toast('✅ 该知识点视频已全部看完，对应学习任务自动完成');}}
 $('#matImportBtn').onclick=()=>$('#matImportFile').click();
-$('#matImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;toast('正在解析文件资料…');try{const txt=await parseImportFile(f,$('#ocrBox2'),$('#ocrText2'));lastImportedText=txt;genQuestions(txt,f.name);}catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,45));}e.target.value='';};
+$('#matImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;toast('正在解析文件资料…');try{const txt=await parseImportFile(f,$('#ocrBox2'),$('#ocrText2'));lastImportedText=txt;importKnowledgeOnly(txt,f.name);}catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,45));}e.target.value='';};
 $('#videoImportBtn').onclick=()=>$('#videoFile').click();
 $('#videoFile').onchange=e=>{
- const f=e.target.files[0];if(!f)return;
- const autoSubject=classify(f.name);
+ const files=[...e.target.files];if(!files.length)return;
+ const autoSubject=classify(files[0].name);
  const ptsMap=parsePoints(S.planner.config.subjects||'');
  const qs=S.kb.questions;
  const subs=[...new Set([...qs.map(q=>q.subject),...S.kb.videos.map(v=>v.subject),...ptsMap.map(p=>p.subject)])];
  const defSubj=subs.includes(autoSubject)?autoSubject:(subs[0]||'综合');
  const subOpts=subs.length?subs.map(s=>'<option value="'+esc(s)+'"'+(s===defSubj?' selected':'')+'>'+esc(s)+'</option>').join(''):'<option value="综合">综合</option>';
- openModal(`<div class="m-title">🎬 视频资料归类</div>
+ openModal(`<div class="m-title">🎬 视频资料归类（${files.length} 个）</div>
+  ${files.length>1?`<div class="soft-box" style="font-size:12.5px;margin-bottom:6px">已选 ${files.length} 个视频，将统一归入下方科目/知识点：<br>${files.map(f=>'· '+esc(f.name)).join('<br>')}</div>`:''}
   <label class="lbl">所属科目文件夹（与文件资料一致）</label>
   <select class="inp" id="vSubject">${subOpts}</select>
   <label class="lbl">所属知识点文件夹</label>
   <select class="inp" id="vPoint"></select>
   <p class="hint" style="margin-top:8px">选择科目后自动加载该科目下的大纲知识点；视频将归入「科目 → 知识点」文件夹。</p>
-  <div class="m-actions"><button class="btn primary" id="vSave">导入</button><button class="btn ghost" id="vCancel">取消</button></div>`);
+  <div class="m-actions"><button class="btn primary" id="vSave">导入${files.length>1?'全部':''}</button><button class="btn ghost" id="vCancel">取消</button></div>`);
  function fillPoints(){const s=$('#vSubject').value;const p=ptsMap.find(x=>x.subject===s)||{points:[]};const opts=p.points.length?p.points.map(x=>'<option value="'+esc(x)+'">'+esc(x)+'</option>').join(''):'<option value="其他">其他</option>';$('#vPoint').innerHTML=opts;}
  fillPoints();
  $('#vSubject').onchange=fillPoints;
- $('#vSave').onclick=()=>{const url=URL.createObjectURL(f);const v=document.createElement('video');v.preload='metadata';v.src=url;
-  v.onloadedmetadata=()=>{const dur=Math.max(1,Math.round(v.duration/60));S.kb.videos.unshift({id:u(),name:f.name.replace(/\.\w+$/,''),subject:$('#vSubject').value,point:$('#vPoint').value,dur,watched:0,progress:0,obUrl:url});closeModal();save();renderVideoTree();toast('视频已导入：'+f.name);};
-  v.onerror=()=>toast('视频加载失败，请重试');};
+ $('#vSave').onclick=async()=>{
+  const subject=$('#vSubject').value,point=$('#vPoint').value;
+  toast('正在处理 '+files.length+' 个视频…');
+  const metas=await Promise.all(files.map(f=>new Promise(res=>{
+   const url=URL.createObjectURL(f);const v=document.createElement('video');v.preload='metadata';v.src=url;
+   v.onloadedmetadata=()=>res({f,url,dur:Math.max(1,Math.round(v.duration/60))});
+   v.onerror=()=>res({f,url,dur:1});
+   setTimeout(()=>res({f,url,dur:1}),8000);   /* 元数据读取超时兜底，仍导入 */
+  })));
+  metas.forEach(m=>S.kb.videos.unshift({id:u(),name:m.f.name.replace(/\.\w+$/,''),subject,point,dur:m.dur,watched:0,progress:0,obUrl:m.url}));
+  closeModal();save();renderVideoTree();toast('✅ 已导入 '+metas.length+' 个视频到「'+subject+' / '+point+'」');
+ };
  $('#vCancel').onclick=closeModal;e.target.value='';};
 function playVideo(v){if(!v)return;if(!v.obUrl){toast('视频文件需重新导入后可播放（观看进度已保留）');return;}
  openModal(`<div class="m-title">🎬 ${esc(v.name)} <span class="tag mint" style="margin-left:auto">${esc(v.subject)}/${esc(v.point||'其他')}</span></div>
