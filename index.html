@@ -2028,17 +2028,20 @@ function renderFolder(){
  const qs=S.kb.questions;
  const kw=matKeyword();
  const ptsMap=parsePoints(S.planner.config.subjects||'');
- const subs=[...new Set([...qs.map(q=>q.subject),...ptsMap.map(p=>p.subject)])];
+ const subs=[...new Set([...qs.map(q=>q.subject),...S.kb.knowledge.map(k=>k.subject),...ptsMap.map(p=>p.subject)])];
  $('#folderTree').innerHTML=subs.length?subs.map(s=>{
   const pts=(ptsMap.find(p=>p.subject===s)||{points:[]}).points;
   const items=qs.filter(q=>q.subject===s);
   const collapsed=!S.kb.folderState[s];
   const knN=S.kb.knowledge.filter(k=>k.subject===s).length;
   let h=`<div class="folder-1 ${collapsed?'collapsed':''}" data-fs="${esc(s)}"><input type="checkbox" class="subj-bulk" data-bs="${esc(s)}" title="选择该科目" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><span class="arrow">▼</span>📁 ${esc(s)} <span class="hint" style="margin-left:auto">${items.length} 题 · ${knN} 知识点</span><button class="btn sm danger" data-sdel="${esc(s)}" style="flex:none;padding:3px 8px" title="删除整个科目文件夹">🗑</button></div>`;
+  const knPts=[...new Set(S.kb.knowledge.filter(k=>k.subject===s).map(k=>k.point))];
+  const allPts=[...new Set([...pts,...knPts])];
   h+=`<div class="folder-2" style="${collapsed?'display:none':''}">`;
-  pts.forEach(p=>{const inIt=items.filter(q=>q.q.indexOf(p)>-1);h+=`<div class="folder-2-item" data-subj="${esc(s)}" data-pt="${esc(p)}">📂 ${esc(p)} <span class="hint" style="margin-left:auto">${inIt.length} 题</span></div>`;});
-  const others=items.filter(q=>!pts.some(p=>q.q.indexOf(p)>-1));
-  if(others.length)h+=`<div class="folder-2-item" data-subj="${esc(s)}" data-pt="__other__">📂 其他 <span class="hint" style="margin-left:auto">${others.length} 题</span></div>`;
+  allPts.forEach(p=>{const inIt=items.filter(q=>q.q.indexOf(p)>-1);const knN2=S.kb.knowledge.filter(k=>k.subject===s&&k.point===p).length;h+=`<div class="folder-2-item" data-subj="${esc(s)}" data-pt="${esc(p)}">📂 ${esc(p)} <span class="hint" style="margin-left:auto">${inIt.length} 题 · ${knN2} 知识点</span></div>`;});
+  const others=items.filter(q=>!allPts.some(p=>q.q.indexOf(p)>-1));
+  const otherKn=S.kb.knowledge.filter(k=>k.subject===s&&!allPts.includes(k.point)).length;
+  if(others.length||otherKn)h+=`<div class="folder-2-item" data-subj="${esc(s)}" data-pt="__other__">📂 其他 <span class="hint" style="margin-left:auto">${others.length} 题 · ${otherKn} 知识点</span></div>`;
   h+=`</div>`;
   return h;
 }).join(''):'<div class="empty-tip">暂无资料，先导入文件资料或生成学习计划。</div>';
