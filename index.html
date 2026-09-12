@@ -2569,11 +2569,13 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
 </select>
 <p class="hint" style="margin:6px 0 0">sensnova 等国产模型常不开放网页跨域；选中转可把请求发到你部署的 Edge Function，绕过浏览器 CORS 限制。</p>
 <label class="lbl">API 地址（本地代理 / 或支持直连的兼容服务）</label><input class="inp" id="aiUrl" value="${esc(S.cloud.aiUrl)}" placeholder="http://127.0.0.1:8787/v1">
+<label class="lbl">API Key</label><input class="inp" id="aiKey" value="${esc(S.cloud.aiKey)}" placeholder="sk-...">
 <div id="edgeBox" style="${S.cloud.aiProxyMode==='edge'?'':'display:none'}">
  <label class="lbl">Edge Function URL</label><input class="inp" id="edgeUrl" value="${esc(S.cloud.edgeFunctionUrl)}" placeholder="https://xxx.supabase.co/functions/v1/llm-proxy">
  <label class="lbl">中转 Token（LLM_PROXY_TOKEN）</label><input class="inp" id="proxyToken" value="${esc(S.cloud.proxyToken)}" placeholder="在 Supabase Secrets 里设置 LLM_PROXY_TOKEN 后填入">
  <p class="hint" style="margin:6px 0 0">需先在 Supabase 部署 llm-proxy Edge Function，并在项目 Secrets 里配置 LLM_PROXY_TOKEN。</p>
 </div>
+<label class="lbl">模型名</label><input class="inp" id="aiModel" value="${esc(S.cloud.aiModel)}" placeholder="deepseek-v4-pro / gpt-4o-mini / sensenova-6.8-flash-lite...">
 <label class="lbl">视觉模型（多模态，可选）</label><input class="inp" id="aiVision" value="${esc(S.cloud.visionModel)}" placeholder="deepseek-vl / qwen-vl-max / glm-4v...">
 <p class="hint" style="margin:6px 0 0">留空则仅用本地 OCR。填了支持图片的模型后，扫描教材/图片将优先由视觉模型读图（识别率远高于 OCR），失败自动回退 OCR。注意：视觉识别每页消耗一次额度，免费模型易触发每日限额。</p>
 <div class="m-actions">
