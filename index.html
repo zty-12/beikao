@@ -962,7 +962,7 @@ function def(){
   /* 新增：艾宾浩斯复习调度池（独立 key，不影响老数据）
      pool: { 'w:<错题id>' | 'r:<背诵id>' : {stage,next,last,type,refId,subject,text} } */
   eb:{pool:{},enabled:true},
-  cloud:{supabaseUrl:'',supabaseKey:'',autoSync:true,lastSync:0,kbqaUrl:'',aiUrl:'',aiKey:'',aiModel:'',ocrWorkers:3}
+  cloud:{supabaseUrl:'',supabaseKey:'',autoSync:true,lastSync:0,kbqaUrl:'',aiUrl:'',aiKey:'',aiModel:'',visionModel:'',aiProxyMode:'direct',edgeFunctionUrl:'',proxyToken:'',ocrWorkers:3}
  };
 }
 function load(){try{const r=localStorage.getItem(LS_KEY);if(r){const d=JSON.parse(r);const b=def();return Object.assign(b,d,{exam:Object.assign(b.exam,d.exam||{}),stats:Object.assign(b.stats,d.stats||{}),planner:Object.assign(b.planner,d.planner||{}),progress:Object.assign(b.progress,d.progress||{}),focus:Object.assign(b.focus,d.focus||{}),kb:Object.assign(b.kb,d.kb||{}),eb:Object.assign(b.eb,d.eb||{},{pool:(d.eb&&d.eb.pool)||{}}),cloud:Object.assign(b.cloud,d.cloud||{})});}}catch(e){}return def();}
@@ -1614,13 +1614,24 @@ async function extractPdfText(file,ocrBox,ocrText){
       const canvas=document.createElement('canvas');
       canvas.width=Math.floor(viewport.width);canvas.height=Math.floor(viewport.height);
       try{await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;}catch(e){canvas.width=canvas.height=0;done++;continue;}
-      /* 直接传 canvas，省掉 toDataURL 的巨大 base64 编解码开销；blocks 模式 + 行级过滤去插图噪声 */
-      const res=await worker.recognize(canvas,{},{blocks:true,text:true});
-      results[idx]=pickOcrText(res&&res.data&&res.data.blocks,(res&&res.data&&res.data.text)||'');
+      let pageText='';
+      if(visionConfigured()){
+        try{
+          const du=canvas.toDataURL('image/jpeg',0.85);
+          const vt=(await visionRecognizeImage(du)).replace(/^\[空白页\]\s*$/u,'').trim();
+          if(vt && assessTextQuality(vt).score>=0.4) pageText=vt;
+        }catch(e){ /* 视觉失败，回退 OCR */ }
+      }
+      if(!pageText){
+        /* 直接传 canvas；blocks 模式 + 行级过滤去插图噪声 */
+        const res=await worker.recognize(canvas,{},{blocks:true,text:true});
+        pageText=pickOcrText(res&&res.data&&res.data.blocks,(res&&res.data&&res.data.text)||'');
+      }
+      results[idx]=pageText;
       canvas.width=canvas.height=0;   /* 及时释放，避免多页 canvas 堆积占内存 */
      }catch(e){results[idx]='';}
      done++;
-     tx.textContent='OCR 识别中 '+done+'/'+maxPages+' 页…';
+     tx.textContent=(visionConfigured()?'视觉模型识别':'OCR 识别')+' '+done+'/'+maxPages+' 页…';
     }
    }));
    for(let w=0;w<workers.length;w++){try{await workers[w].terminate();}catch(e){}}
@@ -1645,9 +1656,10 @@ async function parseImportFile(file,ocrB,ocrT){
 }
 /* 单张图片 OCR 识别（复用行级过滤去插图噪声）；失败抛友好错误 */
 async function extractFromImage(file){
- const ok=await ensureTesseract();if(!ok)throw new Error('图片识别引擎加载失败，请检查网络');
  const box=$('#ocrBox2')||$('#ocrBox'),tx=$('#ocrText2')||$('#ocrText');if(box)box.style.display='block';
- if(tx)tx.textContent='正在识别图片…';
+ if(visionConfigured()){ if(tx)tx.textContent='视觉模型识别图片中…'; try{ const du=await fileToDataUrl(file); const vt=(await visionRecognizeImage(du)).replace(/^\[空白页\]\s*$/u,'').trim(); if(box)box.style.display='none'; if(vt&&assessTextQuality(vt).score>=0.4)return vt; if(tx)tx.textContent='视觉模型结果较差，改用 OCR…'; }catch(e){ if(tx)tx.textContent='视觉模型失败，改用 OCR…'; } }
+ const ok=await ensureTesseract();if(!ok){if(box)box.style.display='none';throw new Error('图片识别引擎加载失败，请检查网络');}
+ if(tx)tx.textContent='正在 OCR 识别图片…';
  try{
    const {createWorker}=window.Tesseract;
    const worker=await createWorker('chi_sim',1,{logger:function(){}});
@@ -1662,10 +1674,56 @@ async function extractFromImage(file){
 /* ================= AI 自动提炼知识点（OpenAI 兼容接口） ================= */
 function aiCfg(){return{url:(S.cloud.aiUrl||'').replace(/\/+$/,''),key:S.cloud.aiKey||'',model:S.cloud.aiModel||''};}
 function aiConfigured(){const c=aiCfg();return !!(c.url&&c.key&&c.model);}
+/* 统一发起 AI 请求：支持 direct（OpenAI 兼容）和 edge（Supabase Edge Function 中转）两种模式 */
+function aiFetch(body){
+ const mode=(S.cloud.aiProxyMode||'direct');
+ const c=aiCfg();
+ if(!c.url||!c.key||!c.model)throw new Error('AI 地址 / Key / 模型未填写');
+ if(mode==='edge'){
+  const url=(S.cloud.edgeFunctionUrl||'').trim();
+  if(!url)throw new Error('未填写 Edge Function URL');
+  const sbKey=S.cloud.supabaseKey||'';
+  if(!sbKey)throw new Error('未填写 Supabase anon key（Edge Function 网关校验需要）');
+  const headers={'Content-Type':'application/json','Authorization':'Bearer '+sbKey,'apikey':sbKey,'x-proxy-token':S.cloud.proxyToken||''};
+  const payload={baseUrl:c.url,apiKey:c.key,model:c.model,messages:body.messages,temperature:typeof body.temperature==='number'?body.temperature:0.7,jsonMode:!!body.jsonMode};
+  return fetch(url,{method:'POST',headers,body:JSON.stringify(payload)}).then(async r=>({ok:r.ok,status:r.status,json:await r.json().catch(()=>({}))}));
+ }
+ // direct：原生 OpenAI 兼容格式
+ const ep=c.url+'/chat/completions';
+ const headers={'Content-Type':'application/json','Authorization':'Bearer '+c.key};
+ const payload={model:c.model,messages:body.messages,temperature:body.temperature};
+ if(body.jsonMode)payload.response_format={type:'json_object'};
+ return fetch(ep,{method:'POST',headers,body:JSON.stringify(payload)}).then(async r=>({ok:r.ok,status:r.status,json:await r.json().catch(()=>({}))}));
+}
+function extractAIContent(j){
+ if(!j)return '';
+ if(typeof j.content==='string')return j.content;
+ if(j.choices&&j.choices[0]&&j.choices[0].message&&typeof j.choices[0].message.content==='string')return j.choices[0].message.content;
+ if(j.choices&&j.choices[0]&&j.choices[0].message&&Array.isArray(j.choices[0].message.content))return j.choices[0].message.content.filter(x=>x.type==='text').map(x=>x.text).join('');
+ return '';
+}
+/* ===== 视觉模型：多模态读图（OpenAI 兼容 image_url）===== */
+function visionCfg(){return{url:(S.cloud.aiUrl||'').replace(/\/+$/,''),key:S.cloud.aiKey||'',model:S.cloud.visionModel||''};}
+function visionConfigured(){if((S.cloud.aiProxyMode||'direct')!=='direct')return false;const c=visionCfg();return !!(c.url&&c.key&&c.model);}
+function fileToDataUrl(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);});}
+function makeTestImage(){const c=document.createElement('canvas');c.width=200;c.height=80;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,200,80);x.fillStyle='#000';x.font='28px sans-serif';x.fillText('测试 123',20,50);return c.toDataURL('image/jpeg',0.9);}
+/* 把一张图（dataURL）发给多模态模型，原样读出文字；失败抛错 */
+async function visionRecognizeImage(dataUrl){
+ const c=visionCfg();const ep=c.url+'/chat/completions';
+ const body={model:c.model,messages:[{role:'user',content:[
+   {type:'text',text:'你是一名中文/英文教材识别助手。原样读出这页教材/讲义/笔记上所有可见文字，保留排版顺序与段落结构，用 Markdown 风格输出；保留「第N章/Unit N/题号/选项/填空横线」；整页为插图/封面/留白时只输出[空白页]；不要任何解释。'},
+   {type:'image_url',image_url:{url:dataUrl,detail:'high'}}
+ ]}],temperature:0.2};
+ const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+c.key},body:JSON.stringify(body)});
+ if(!r.ok){let msg='HTTP '+r.status;try{const j=await r.json();msg=(j.error&&(j.error.message||j.error))||msg;}catch(e){}throw new Error(msg);}
+ const j=await r.json();
+ let content=(j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||'';
+ if(Array.isArray(content))content=content.filter(x=>x.type==='text').map(x=>x.text).join('');
+ return String(content||'').trim();
+}
 /* 调用 AI，返回 {ok, data|text, msg}。testOnly=true 时只做连通性测试。 */
 async function aiExtractKnowledge(text,extra='',testOnly=false){
  const c=aiCfg();
- const ep=testOnly?(c.url+'/chat/completions'):(c.url+'/chat/completions');
  if(testOnly&&(!c.url||!c.key||!c.model))return{ok:false,msg:'请先在设置填写 AI 地址 / Key / 模型'};
  const sys=testOnly?'你是测试助手。':'你是一名资深的备考知识整理专家。';
  const user=testOnly?text:(`请从以下教材/PPT 讲义内容中提炼备考知识点，严格按照如下 JSON 格式输出（不要输出任何多余文字或代码块标记）：
@@ -1689,11 +1747,11 @@ async function aiExtractKnowledge(text,extra='',testOnly=false){
 下面是教材内容：
 ${text.slice(0,12000)}${extra?('\n\n补充背景：'+extra):''}`);
  try{
-  const body={model:c.model,messages:[{role:'system',content:sys},{role:'user',content:user}],temperature:0.3};
-  const r=await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+c.key},body:JSON.stringify(body)});
-  if(!r.ok){let msg='HTTP '+r.status;try{const j=await r.json();msg=(j.error&&(j.error.message||j.error))||msg;}catch(e){}return{ok:false,msg:'请求失败：'+msg};}
-  const j=await r.json();
-  const content=(j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||'';
+  const body={model:c.model,messages:[{role:'system',content:sys},{role:'user',content:user}],temperature:0.3,jsonMode:!testOnly};
+  const r=await aiFetch(body);
+  if(!r.ok){let msg='HTTP '+(r.status||'');const j=r.json;msg=(j.error&&(j.error.message||j.error))||msg;return{ok:false,msg:'请求失败：'+msg};}
+  const j=r.json;
+  const content=extractAIContent(j)||'';
   if(testOnly)return{ok:true,text:content};
   /* 解析 JSON（容忍代码块 ```json 包裹） */
   let clean=content.trim().replace(/^```(?:json)?\s*/i,'').replace(/```$/,'').trim();
@@ -1703,14 +1761,16 @@ ${text.slice(0,12000)}${extra?('\n\n补充背景：'+extra):''}`);
   if(!data||!Array.isArray(data.knowledge))return{ok:false,msg:'AI 返回格式无法解析，请重试或更换模型',raw:content.slice(0,300)};
   return{ok:true,data,raw:content};
  }catch(e){const m=(e.message||'');let msg='网络错误：'+m;
-  /* 识别 CORS / 直连失败，引导用本地代理 */
+  /* 识别 CORS / 直连失败，引导用中转或本地代理 */
   if(/failed|CORS|cross-origin|fetch|NetworkError/i.test(m)&&c.url.indexOf('127.0.0.1')<0&&c.url.indexOf('localhost')<0){
-   msg='连接失败（可能是 '+c.url.split('/')[2]+' 不支持网页直连/CORS）。请启动本地代理并把地址改为 http://127.0.0.1:8787/v1（详见设置→AI 使用说明）。';
+   if((S.cloud.aiProxyMode||'direct')==='direct'){
+    msg='连接失败（可能是 '+c.url.split('/')[2]+' 不支持网页直连/CORS）。可切换到「经 Supabase Edge Function 中转」模式，或改用本地代理。';
+   }else{
+    msg='Edge Function 连接失败，请检查 Edge Function URL / 中转 Token / Supabase anon key。';
+   }
   }
   return{ok:false,msg};}
-}
-/* 内置一份 AI 提炼示例（无 API 时供用户了解产物） */
-function aiSampleData(){
+}function aiSampleData(){
  return{knowledge:[
   {subject:'环境监测与分析',point:'水质监测指标',content:'水质监测主要包括物理指标（温度、浊度）、化学指标（pH、DO、COD、BOD）与生物指标。溶解氧常用碘量法测定，COD反映有机物污染总量。'},
   {subject:'环境监测与分析',point:'水样采集与保存',content:'采样前需冲洗采样器2-3次；测定溶解氧需加固定剂并避光冷藏；不同项目保存时限不同，如pH应在现场测定。'}
@@ -2502,10 +2562,21 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
  <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
  <div class="panel-head">🤖 AI 自动提炼知识点</div>
  <div class="soft-box" style="font-size:12.5px;margin-bottom:8px">⚠️ sensnova 不开放网页直连（会报 CORS / fetch failed）。请<b>先在本地运行中转到代理</b>，再填地址。详见下方「使用说明」。</div>
- <label class="lbl">API 地址（本地代理 / 或支持直连的兼容服务）</label><input class="inp" id="aiUrl" value="${esc(S.cloud.aiUrl)}" placeholder="http://127.0.0.1:8787/v1">
- <label class="lbl">API Key</label><input class="inp" id="aiKey" value="${esc(S.cloud.aiKey)}" placeholder="sk-...">
- <label class="lbl">模型名</label><input class="inp" id="aiModel" value="${esc(S.cloud.aiModel)}" placeholder="deepseek-v4-pro / gpt-4o-mini...">
- <div class="m-actions">
+ <label class="lbl">请求模式</label>
+<select class="inp" id="aiProxyMode">
+ <option value="direct" ${S.cloud.aiProxyMode!=='edge'?'selected':''}>直接请求（需本地代理 / CORS 支持）</option>
+ <option value="edge" ${S.cloud.aiProxyMode==='edge'?'selected':''}>经 Supabase Edge Function 中转</option>
+</select>
+<p class="hint" style="margin:6px 0 0">sensnova 等国产模型常不开放网页跨域；选中转可把请求发到你部署的 Edge Function，绕过浏览器 CORS 限制。</p>
+<label class="lbl">API 地址（本地代理 / 或支持直连的兼容服务）</label><input class="inp" id="aiUrl" value="${esc(S.cloud.aiUrl)}" placeholder="http://127.0.0.1:8787/v1">
+<div id="edgeBox" style="${S.cloud.aiProxyMode==='edge'?'':'display:none'}">
+ <label class="lbl">Edge Function URL</label><input class="inp" id="edgeUrl" value="${esc(S.cloud.edgeFunctionUrl)}" placeholder="https://xxx.supabase.co/functions/v1/llm-proxy">
+ <label class="lbl">中转 Token（LLM_PROXY_TOKEN）</label><input class="inp" id="proxyToken" value="${esc(S.cloud.proxyToken)}" placeholder="在 Supabase Secrets 里设置 LLM_PROXY_TOKEN 后填入">
+ <p class="hint" style="margin:6px 0 0">需先在 Supabase 部署 llm-proxy Edge Function，并在项目 Secrets 里配置 LLM_PROXY_TOKEN。</p>
+</div>
+<label class="lbl">视觉模型（多模态，可选）</label><input class="inp" id="aiVision" value="${esc(S.cloud.visionModel)}" placeholder="deepseek-vl / qwen-vl-max / glm-4v...">
+<p class="hint" style="margin:6px 0 0">留空则仅用本地 OCR。填了支持图片的模型后，扫描教材/图片将优先由视觉模型读图（识别率远高于 OCR），失败自动回退 OCR。注意：视觉识别每页消耗一次额度，免费模型易触发每日限额。</p>
+<div class="m-actions">
    <button class="btn sm" id="aiTest">测试连接</button>
    <button class="btn sm ghost" id="aiHelp">使用说明（含代理）</button>
  </div>
@@ -2514,8 +2585,19 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
  <div class="m-actions"><button class="btn primary" id="setSave">保存设置</button><button class="btn ghost" id="setExport">📤 导出备份</button><button class="btn ghost" id="setImport">📥 导入备份</button></div>
  <input type="file" id="setImportFile" accept=".json" style="display:none">
  <div class="m-actions"><button class="btn danger" id="setReset" style="flex:1">恢复初始工作台</button></div>`);
- $('#setSave').onclick=()=>{S.exam.name=$('#setExamName').value.trim()||S.exam.name;S.exam.date=$('#setExamDate').value||S.exam.date;S.cloud.supabaseUrl=$('#sbUrl').value.trim();S.cloud.supabaseKey=$('#sbKey').value.trim();S.cloud.autoSync=$('#sbAuto').checked;S.cloud.aiUrl=$('#aiUrl').value.trim();S.cloud.aiKey=$('#aiKey').value.trim();S.cloud.aiModel=$('#aiModel').value.trim();S.cloud.ocrWorkers=Number($('#sbOcr').value)||3;closeModal();save();renderCountdown();toast('设置已保存');};
- $('#aiTest').onclick=async()=>{S.cloud.aiUrl=$('#aiUrl').value.trim();S.cloud.aiKey=$('#aiKey').value.trim();S.cloud.aiModel=$('#aiModel').value.trim();const st=$('#aiStatus');st.textContent='⏳ 正在测试 AI 连接…';const r=await aiExtractKnowledge('请用一句话回复：测试连接成功','',true);st.textContent=r.ok?'✅ AI 连接成功，模型可正常调用':'❌ '+r.msg;};
+ $('#setSave').onclick=()=>{S.exam.name=$('#setExamName').value.trim()||S.exam.name;S.exam.date=$('#setExamDate').value||S.exam.date;S.cloud.supabaseUrl=$('#sbUrl').value.trim();S.cloud.supabaseKey=$('#sbKey').value.trim();S.cloud.autoSync=$('#sbAuto').checked;S.cloud.aiUrl=$('#aiUrl').value.trim();S.cloud.aiKey=$('#aiKey').value.trim();S.cloud.aiModel=$('#aiModel').value.trim();S.cloud.visionModel=$('#aiVision').value.trim();S.cloud.aiProxyMode=$('#aiProxyMode').value;S.cloud.edgeFunctionUrl=$('#edgeUrl').value.trim();S.cloud.proxyToken=$('#proxyToken').value.trim();S.cloud.ocrWorkers=Number($('#sbOcr').value)||3;closeModal();save();renderCountdown();toast('设置已保存');};
+ $('#aiTest').onclick=async()=>{
+S.cloud.aiUrl=$('#aiUrl').value.trim();S.cloud.aiKey=$('#aiKey').value.trim();S.cloud.aiModel=$('#aiModel').value.trim();S.cloud.visionModel=$('#aiVision').value.trim();S.cloud.aiProxyMode=$('#aiProxyMode').value;S.cloud.edgeFunctionUrl=$('#edgeUrl').value.trim();S.cloud.proxyToken=$('#proxyToken').value.trim();
+const st=$('#aiStatus');st.textContent='⏳ 正在测试 AI 连接…';
+const r=await aiExtractKnowledge('请用一句话回复：测试连接成功','',true);
+let msg=r.ok?'✅ 文本模型连接成功':'❌ 文本模型：'+r.msg;
+if($('#aiVision').value.trim() && S.cloud.aiProxyMode!=='edge'){ try{ const du=makeTestImage(); const v=await visionRecognizeImage(du); const ok=/[0-9]/.test(v); msg+='；'+(ok?'✅ 视觉模型可读图':'⚠️ 视觉模型返回异常：'+(v||'').slice(0,30)); }catch(e){ msg+='；❌ 视觉模型：'+((e&&e.message)||'').slice(0,40); } }
+else if($('#aiVision').value.trim() && S.cloud.aiProxyMode==='edge'){ msg+='；⚠️ Edge Function 中转暂不支持视觉模型，已禁用'; }
+st.textContent=msg;
+};
+$('#aiProxyMode').onchange=function(){
+ const b=$('#edgeBox'); if(b)b.style.display=this.value==='edge'?'block':'none';
+};
  $('#aiHelp').onclick=()=>{openModal(`<div class="m-title">🤖 AI 自动提炼知识点（含本地代理）</div><div class="soft-box" style="white-space:pre-line">【为什么报 CORS / fetch failed】
 sensnova 服务端不开放网页直接跨域调用，浏览器出于安全会拦截
 （报错：net::ERR_FAILED / CORS policy）。这是服务端限制，改前端代码无法绕过，
