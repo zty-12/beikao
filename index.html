@@ -588,7 +588,7 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
       <div class="tab-pane" id="tab-material" style="display:block">
         <div class="btn-row">
           <button class="btn sm primary" id="matImportBtn">📄 导入文件资料</button>
-          <input type="file" id="matImportFile" accept=".pdf,.txt,.doc,.docx" style="display:none">
+          <input type="file" id="matImportFile" accept=".pdf,.txt,.doc,.docx,.png,.jpg,.jpeg,.webp,.bmp,.gif" style="display:none">
           <button class="btn sm" id="videoImportBtn">🎬 导入视频资料</button>
           <input type="file" id="videoFile" accept="video/*" multiple style="display:none">
         </div>
@@ -1507,6 +1507,76 @@ let tessLoading=null;
 function ensureTesseract(){if(window.Tesseract)return Promise.resolve(true);if(tessLoading)return tessLoading;tessLoading=(async()=>{try{await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');return !!window.Tesseract;}catch(e){return false;}})();return tessLoading;}
 let mammothLoading=null;
 function ensureMammoth(){if(window.mammoth)return Promise.resolve(true);if(mammothLoading)return mammothLoading;mammothLoading=(async()=>{try{await loadScript('https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js');return !!window.mammoth;}catch(e){return false;}})();return mammothLoading;}
+/* ===== OCR 行级过滤 + 文本质量评估（移植自教务工作台识别链路） ===== */
+/* OCR 垃圾行：插图/装饰纹理被 tesseract 误读成的碎片行，特征为极低有效字符或极短 */
+function isJunkOcrLine(text){
+ const s=(text||'').replace(/\s+/g,'');
+ if(!s)return true;
+ let cjk=0,latin=0,digit=0;
+ for(const ch of s){
+   if(/[一-龥]/.test(ch))cjk++;
+   else if((ch>='A'&&ch<='Z')||(ch>='a'&&ch<='z'))latin++;
+   else if(ch>='0'&&ch<='9')digit++;
+ }
+ if(cjk+latin===0)return digit===0||s.length<=3;
+ if(cjk===0&&latin<=1&&digit<=1)return true;
+ /* 插图误读特征：含较多非字母数字中文的符号（如 [dd| @ # * ） */
+ const sym=s.replace(/[A-Za-z0-9一-龥]/g,'');
+ if(sym.length>=2&&sym.length>=s.length*0.3)return true;
+ return false;
+}
+/* 从 tesseract blocks 结构里挑出可信文本；结构不足时回退 rawText */
+function pickOcrText(blocks,rawText){
+ if(!blocks||!Array.isArray(blocks))return (rawText||'').trim();
+ const lines=[];
+ try{
+   blocks.forEach(b=>{(b.paragraphs||[]).forEach(p=>{(p.lines||[]).forEach(l=>{lines.push({t:l.text||'',c:Number(l.confidence)||0});});});});
+ }catch(e){return (rawText||'').trim();}
+ /* 行数充足：按置信度 + junk 过滤；插图页（垃圾行过半）整页丢弃 */
+ if(lines.length>=5){
+   const rawLines=(rawText||'').split('\n').map(s=>s.trim()).filter(Boolean);
+   const rawJunk=rawLines.length?rawLines.filter(isJunkOcrLine).length/rawLines.length:1;
+   const kept=lines.filter(l=>l.c>=45&&!isJunkOcrLine(l.t));
+   const keptChars=kept.reduce((n,l)=>n+l.t.replace(/\s+/g,'').length,0);
+   const allChars=lines.reduce((n,l)=>n+l.t.replace(/\s+/g,'').length,0);
+   if(kept.length===0||keptChars<0.2*allChars)return rawJunk>0.5?'':(rawText||'').trim();
+   return kept.map(l=>l.t.trim()).filter(Boolean).join('\n');
+ }
+ /* 行数少（单页/短页）：仍按置信度过滤低质行，避免插图噪声进正文；过滤后为空则回退原文 */
+ const keptSmall=lines.filter(l=>l.c>=45).map(l=>l.t.trim()).filter(Boolean);
+ return keptSmall.length?keptSmall.join('\n'):(rawText||'').trim();
+}
+/* 文本质量评估：判断提取文字是否像人话（乱码检测），返回 0~1 评分与是否可疑 */
+function assessTextQuality(text){
+ const compact=(text||'').replace(/\s+/g,'');
+ const n=compact.length;
+ if(n===0)return{score:0,suspicious:true,reason:'未提取到文字'};
+ const cjk=(compact.match(/[一-龥]/g)||[]).length;
+ const cjkRatio=cjk/n;
+ let noise=0;
+ const okPunct=new Set('，。、；：！？（）《》【】「」『』“”‘’—…·,.!?;:()[]{}%+-*/=&<>#$€¥£№\'"'.split(''));
+ for(const ch of compact){
+   if((ch>='A'&&ch<='Z')||(ch>='a'&&ch<='z')||(ch>='0'&&ch<='9'))continue;
+   if(/[一-龥]/.test(ch))continue;
+   if(okPunct.has(ch))continue;
+   noise++;
+ }
+ const noiseRatio=noise/n;
+ const tokens=(text.match(/[A-Za-z]{2,}/g)||[]);
+ const tokenCount=tokens.length;
+ const longCount=tokens.filter(t=>t.length>=5).length;
+ const shortCount=tokens.filter(t=>t.length<=2).length;
+ const longShare=tokenCount?longCount/tokenCount:0;
+ const shortShare=tokenCount?shortCount/tokenCount:0;
+ const reasons=[];
+ if(noiseRatio>0.06&&cjkRatio<0.2)reasons.push('异常符号占'+Math.round(noiseRatio*100)+'%');
+ if(cjkRatio<0.02&&tokenCount>=40&&longShare<0.1&&shortShare>0.5)reasons.push('英文碎片化');
+ const latinChars=tokens.reduce((s,t)=>s+t.length,0);
+ const langRatio=(cjk+latinChars)/n;
+ const score=Math.max(0,Math.min(1,langRatio-1.8*noiseRatio-0.6*shortShare));
+ return{score:Number(score.toFixed(3)),suspicious:reasons.length>0,reason:reasons.join('；')};
+}
+
 async function extractPdfText(file,ocrBox,ocrText){
  const ok=await ensurePdfJs();if(!ok)throw new Error('PDF解析引擎加载失败，请检查网络或改用TXT');
  const buf=await file.arrayBuffer();
@@ -1544,9 +1614,9 @@ async function extractPdfText(file,ocrBox,ocrText){
       const canvas=document.createElement('canvas');
       canvas.width=Math.floor(viewport.width);canvas.height=Math.floor(viewport.height);
       try{await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;}catch(e){canvas.width=canvas.height=0;done++;continue;}
-      /* 直接传 canvas，省掉 toDataURL 的巨大 base64 编解码开销 */
-      const res=await worker.recognize(canvas);
-      results[idx]=(res&&res.data&&res.data.text)||'';
+      /* 直接传 canvas，省掉 toDataURL 的巨大 base64 编解码开销；blocks 模式 + 行级过滤去插图噪声 */
+      const res=await worker.recognize(canvas,{},{blocks:true,text:true});
+      results[idx]=pickOcrText(res&&res.data&&res.data.blocks,(res&&res.data&&res.data.text)||'');
       canvas.width=canvas.height=0;   /* 及时释放，避免多页 canvas 堆积占内存 */
      }catch(e){results[idx]='';}
      done++;
@@ -1567,10 +1637,27 @@ async function extractPdfText(file,ocrBox,ocrText){
 async function parseImportFile(file,ocrB,ocrT){
  const name=file.name.toLowerCase();
  if(name.endsWith('.txt'))return await file.text();
+ if(/\.(png|jpe?g|webp|bmp|gif)$/.test(name)||(file.type&&file.type.indexOf('image/')===0))return await extractFromImage(file);
  if(name.endsWith('.pdf'))return await extractPdfText(file,ocrB,ocrT);
  if(name.endsWith('.docx')){const ok=await ensureMammoth();if(!ok)throw new Error('Word 解析引擎加载失败，请检查网络');const buf=await file.arrayBuffer();const r=await window.mammoth.extractRawText({arrayBuffer:buf});return r.value;}
  if(name.endsWith('.doc')){try{return new TextDecoder('gb18030').decode(await file.arrayBuffer());}catch(e){throw new Error('.doc 老格式暂不支持，请另存为 .docx 或 .txt');}}
  throw new Error('不支持的文件格式');
+}
+/* 单张图片 OCR 识别（复用行级过滤去插图噪声）；失败抛友好错误 */
+async function extractFromImage(file){
+ const ok=await ensureTesseract();if(!ok)throw new Error('图片识别引擎加载失败，请检查网络');
+ const box=$('#ocrBox2')||$('#ocrBox'),tx=$('#ocrText2')||$('#ocrText');if(box)box.style.display='block';
+ if(tx)tx.textContent='正在识别图片…';
+ try{
+   const {createWorker}=window.Tesseract;
+   const worker=await createWorker('chi_sim',1,{logger:function(){}});
+   const res=await worker.recognize(file,{},{blocks:true,text:true});
+   await worker.terminate();
+   if(box)box.style.display='none';
+   const t=pickOcrText(res&&res.data&&res.data.blocks,(res&&res.data&&res.data.text)||'');
+   if(t.trim())return t;
+   throw new Error('未从图片中识别出可读文字，请换更清晰的图片');
+ }catch(e){if(box)box.style.display='none';throw new Error('图片识别失败：'+((e&&e.message)||'').slice(0,40));}
 }
 /* ================= AI 自动提炼知识点（OpenAI 兼容接口） ================= */
 function aiCfg(){return{url:(S.cloud.aiUrl||'').replace(/\/+$/,''),key:S.cloud.aiKey||'',model:S.cloud.aiModel||''};}
@@ -1643,6 +1730,14 @@ function parseKnowledgeFile(text,src){
  let curSubject=null,curH1=null,curH2=null,curContent=[];
  let pendingQ=null;
  const curPoint=()=>curH1?(curH2?(curH1+'·'+curH2):curH1):null;
+ /* 预处理：统计跨页重复行，识别并剔除运行页眉/页脚（如「刘燕刘建伟 主编」、页码装饰） */
+ const _lines0=String(text||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+ const _freq={};_lines0.forEach(l=>{_freq[l]=(_freq[l]||0)+1;});
+ const headerSet=new Set();
+ for(const l in _freq){
+   if(_freq[l]>=3&&l.length<=40&&/(主编|编著|出版社|出版|©|copyright|第.+版|著$)/i.test(l))headerSet.add(l);
+   else if(_freq[l]>=8&&l.length<=20)headerSet.add(l);
+ }
  function flushQ(){
   if(pendingQ&&pendingQ.q){
    const opts=['A','B','C','D'].filter(l=>pendingQ.options[l]).map(l=>pendingQ.options[l]);
@@ -1663,6 +1758,7 @@ function parseKnowledgeFile(text,src){
  }
  String(text||'').split(/\r?\n/).forEach(raw=>{
   let l=raw.trim();if(!l)return;
+  if(headerSet.has(l))return;  /* 跳过运行页眉/页脚噪声行 */
   /* 目录页行（标题……页码）直接跳过 */
   if(/[…⋯]{2,}/.test(l)&&/\d{1,4}\s*$/.test(l))return;
   const qm=l.match(/^(问题\s*\d*|第\s*\d+\s*题|Q\d*)[.、:：)）]?\s*(.+)$/i);
@@ -1688,8 +1784,8 @@ function parseKnowledgeFile(text,src){
    if(curH1)curH2=title;else curH1=title;
    return;
   }
-  /* 短行无标点视为小标题：有一级时作二级，否则作一级 */
-  if(l.length<=16&&!l.includes('。')&&!l.includes('，')&&!/^\d/.test(l)&&!l.endsWith('：')){flushQ();flushContent();if(curH1)curH2=l;else curH1=l;return;}
+  /* 短行无标点视为小标题：有一级时作二级，否则作一级（排除页眉/出版社信息） */
+  if(l.length<=16&&!l.includes('。')&&!l.includes('，')&&!/^\d/.test(l)&&!l.endsWith('：')&&!/主编|编著|出版社|出版|著$|©|copyright/i.test(l)){flushQ();flushContent();if(curH1)curH2=l;else curH1=l;return;}
   /* 正文 */
   if(curSubject||curH1)curContent.push(l);
   else out.plain.push(l);
@@ -2177,7 +2273,18 @@ function renderVideoTree(){
 }
 function checkVideoTaskDone(){let changed=false;S.kb.videos.forEach(v=>{if(v.progress>=100&&v.point){allTasks().forEach(t=>{if(t.subject===v.subject&&t.name&&t.name.indexOf(v.point)>-1&&!t.done){t.done=true;changed=true;}});}});if(changed){save();renderTasks();renderProgress();renderStats();toast('✅ 该知识点视频已全部看完，对应学习任务自动完成');}}
 $('#matImportBtn').onclick=()=>$('#matImportFile').click();
-$('#matImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;toast('正在解析文件资料…');try{const txt=await parseImportFile(f,$('#ocrBox2'),$('#ocrText2'));lastImportedText=txt;importKnowledgeOnly(txt,f.name);}catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,45));}e.target.value='';};
+$('#matImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;
+ if(!aiConfigured()){
+   toast('正在解析文件资料…');try{const txt=await parseImportFile(f,$('#ocrBox2'),$('#ocrText2'));lastImportedText=txt;importKnowledgeOnly(txt,f.name);}catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,45));}e.target.value='';return;
+ }
+ toast('正在用 AI 整理知识点…');
+ try{
+   const txt=await parseImportFile(f,$('#ocrBox2'),$('#ocrText2'));lastImportedText=txt;
+   const r=await aiExtractKnowledge(txt,'这是资料库导入，请侧重提炼教材知识点（subject/point/content），题目可为空');
+   if(r.ok&&r.data&&Array.isArray(r.data.knowledge)&&r.data.knowledge.length){ showAiPreview({knowledge:r.data.knowledge,questions:[]}); }
+   else { toast('AI 未返回知识点，改用本地解析'); importKnowledgeOnly(txt,f.name); }
+ }catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,45));}
+ e.target.value='';};
 $('#videoImportBtn').onclick=()=>$('#videoFile').click();
 $('#videoFile').onchange=e=>{
  const files=[...e.target.files];if(!files.length)return;
