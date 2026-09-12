@@ -2312,8 +2312,8 @@ $('#genPackage').onclick=genPackage;
 
 /* ================= Supabase ================= */
 function sbCfg(){return{url:(S.cloud.supabaseUrl||'').replace(/\/+$/,''),key:S.cloud.supabaseKey||''};}
-async function sbUpsert(){const{url,key}=sbCfg();if(!url||!key)return{ok:false,msg:'未配置'};try{const r=await fetch(url+'/rest/v1/beikao_workbench?id=eq.main',{method:'PUT',headers:{apikey:key,Authorization:'Bearer '+key,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates'},body:JSON.stringify({id:'main',data:JSON.stringify(S),updated_at:new Date().toISOString()})});if(r.ok)S.cloud.lastSync=Date.now();return r.ok?{ok:true}:{ok:false,msg:'HTTP '+r.status};}catch(e){return{ok:false,msg:'网络错误'};}}
-async function sbFetch(){const{url,key}=sbCfg();if(!url||!key)return{ok:false,msg:'未配置'};try{const r=await fetch(url+'/rest/v1/beikao_workbench?select=data,updated_at&id=eq.main',{headers:{apikey:key,Authorization:'Bearer '+key}});if(!r.ok)return{ok:false,msg:'HTTP '+r.status};const rows=await r.json();if(rows&&rows[0]&&rows[0].data)return{ok:true,data:JSON.parse(rows[0].data),remoteAt:rows[0].updated_at};return{ok:false,msg:'云端暂无备份数据'};}catch(e){return{ok:false,msg:'网络错误'};}}
+async function sbUpsert(){const{url,key}=sbCfg();if(!url||!key)return{ok:false,msg:'未配置'};try{const safe=Object.assign({},S);safe.cloud=Object.assign({},S.cloud||{},{aiKey:'',supabaseKey:''});const r=await fetch(url+'/rest/v1/beikao_workbench?id=eq.beikao%3Amain',{method:'PUT',headers:{apikey:key,Authorization:'Bearer '+key,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates'},body:JSON.stringify({id:'beikao:main',data:JSON.stringify(safe),updated_at:new Date().toISOString()})});if(r.ok)S.cloud.lastSync=Date.now();return r.ok?{ok:true}:{ok:false,msg:'HTTP '+r.status};}catch(e){return{ok:false,msg:'网络错误'};}}
+async function sbFetch(){const{url,key}=sbCfg();if(!url||!key)return{ok:false,msg:'未配置'};try{const r=await fetch(url+'/rest/v1/beikao_workbench?select=data,updated_at&id=eq.beikao%3Amain',{headers:{apikey:key,Authorization:'Bearer '+key}});if(!r.ok)return{ok:false,msg:'HTTP '+r.status};const rows=await r.json();if(rows&&rows[0]&&rows[0].data){const remoteData=JSON.parse(rows[0].data);if(remoteData.cloud&&S&&S.cloud){if(S.cloud.aiKey)remoteData.cloud.aiKey=S.cloud.aiKey;if(S.cloud.supabaseKey)remoteData.cloud.supabaseKey=S.cloud.supabaseKey;}return{ok:true,data:remoteData,remoteAt:rows[0].updated_at};}return{ok:false,msg:'云端暂无备份数据'};}catch(e){return{ok:false,msg:'网络错误'};}}
 function renderSyncStatus(msg,ok){const el=$('#syncStatus');if(el){el.textContent=msg;el.style.color=ok?'#4E8A62':'#C0705C';}}
 
 /* ================= 设置 ================= */
@@ -2333,7 +2333,7 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
    <button class="btn sm primary" id="sbPush">立即上传</button>
    <button class="btn sm ghost" id="sbPull">从云端恢复</button>
  </div>
- <p class="sync-status" id="syncStatus">尚未同步。建表 SQL：create table beikao_workbench(id text primary key,data jsonb,updated_at timestamptz default now());</p>
+ <p class="sync-status" id="syncStatus">尚未同步。建表 SQL（请在 Supabase SQL 编辑器执行）：<br><code style="font-size:11px;line-height:1.5">create table if not exists beikao_workbench(id text primary key,data jsonb not null,updated_at timestamptz default now());<br>alter table beikao_workbench enable row level security;<br>create policy beikao_rw on beikao_workbench for all using (true) with check (true);</code><br>行 key=<code>beikao:main</code>；AI 私钥与 supabase 密钥不落库。</p>
  <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
  <div class="panel-head">🔍 图片型 PDF 识别速度</div>
  <label class="lbl">OCR 并发数</label>
