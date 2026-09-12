@@ -1513,7 +1513,7 @@ async function extractPdfText(file,ocrBox,ocrText){
   const okT=await ensureTesseract();if(!okT)throw new Error('图片型 PDF 需 OCR，但 OCR 引擎加载失败，请检查网络');
   const box=ocrBox||$('#ocrBox'),tx=ocrText||$('#ocrText');box.style.display='block';
   let ocrTxt='';
-  const maxPages=Math.min(pdf.numPages,300);
+  const maxPages=Math.min(pdf.numPages,1000);
   /* 渲染倍率 2 → 1.5：像素量减少约 44%，中文识别精度几乎无损（想更准可改回 2） */
   const SCALE=1.5;
   /* 并发 worker 数：1 / 3 / 5（设置里可调），默认 3 */
