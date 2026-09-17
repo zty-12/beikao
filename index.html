@@ -1742,60 +1742,58 @@ async function visionRecognizeImage(dataUrl){
 async function aiExtractKnowledge(text,extra='',testOnly=false){
  const c=aiCfg();
  if(testOnly&&(!c.url||!c.key||!c.model))return{ok:false,msg:'请先在设置填写 AI 地址 / Key / 模型'};
- const sys=testOnly?'你是测试助手。':'你是一名资深的备考知识整理专家。';
- const user=testOnly?text:(`请从以下教材/PPT 讲义内容中提炼备考知识点，严格按照如下 JSON 格式输出（不要输出任何多余文字或代码块标记）：
-{
-  "knowledge": [
-    {"subject":"科目名","point":"知识点标题","content":"该知识点的核心内容，2-6句，覆盖考试要点"}
-  ],
-  "questions": [
-    {"subject":"科目名","point":"知识点标题","type":"choice|blank","q":"题干",
-     "options":["选项A","选项B","选项C","选项D"],
-     "answer":"答案（choice表示ABCD字母；blank为答案文本）",
-     "explain":"解析/易错提醒"}
-  ]
-}
-要求：
-1. 优先按讲义里的章节/标题提炼知识点，每条 content 精炼、直接可背诵。
-2. 提取 3-10 条知识点，和尽可能多的选择题（含 4 选项）与少量填空题。
-3. subject 用最贴切的一级科目名；不要虚构讲义里没有的内容。
-4. JSON 必须合法，字符串内不能有未转义的引号或换行。
-
-下面是教材内容：
-${text.slice(0,12000)}${extra?('\n\n补充背景：'+extra):''}`);
- try{
-  const body={model:c.model,messages:[{role:'system',content:sys},{role:'user',content:user}],temperature:0.3,jsonMode:!testOnly};
-  const r=await aiFetch(body);
-  if(!r.ok){let msg='HTTP '+(r.status||'');const j=r.json;msg=(j.error&&(j.error.message||j.error))||msg;return{ok:false,msg:'请求失败：'+msg};}
-  const j=r.json;
-  const content=extractAIContent(j)||'';
-  if(testOnly)return{ok:true,text:content};
-  /* 解析 JSON（容忍代码块 ```json 包裹） */
-  let clean=content.trim().replace(/^```(?:json)?\s*/i,'').replace(/```$/,'').trim();
-  const m=clean.match(/\{[\s\S]*\}/);
-  let data=null;
-  if(m){try{data=JSON.parse(m[0]);}catch(e){}}
-  if(!data||!Array.isArray(data.knowledge))return{ok:false,msg:'AI 返回格式无法解析，请重试或更换模型',raw:content.slice(0,300)};
-  return{ok:true,data,raw:content};
- }catch(e){const m=(e.message||'');let msg='网络错误：'+m;
-  /* 识别 CORS / 直连失败，引导用中转或本地代理 */
-  if(/failed|CORS|cross-origin|fetch|NetworkError/i.test(m)&&c.url.indexOf('127.0.0.1')<0&&c.url.indexOf('localhost')<0){
-   if((S.cloud.aiProxyMode||'direct')==='direct'){
-    msg='连接失败（可能是 '+c.url.split('/')[2]+' 不支持网页直连/CORS）。可切换到「经 Supabase Edge Function 中转」模式，或改用本地代理。';
-   }else{
-    msg='Edge Function 连接失败，请检查 Edge Function URL / 中转 Token / Supabase anon key。';
+ if(testOnly){
+  try{const r=await aiFetch({model:c.model,messages:[{role:'system',content:'你是测试助手。'},{role:'user',content:text}],temperature:0.3});
+   if(!r.ok){let msg='HTTP '+(r.status||'');const j=r.json;msg=(j.error&&(j.error.message||j.error))||msg;return{ok:false,msg:'请求失败：'+msg};}
+   return{ok:true,text:extractAIContent(r.json)||''};}
+  catch(e){return{ok:false,msg:'网络错误：'+(e.message||'')};}
+ }
+ /* 长文档分块 + 逐块归类 + 合并 + 429 重试（参考教务 classifyImportedDocument） */
+ const chunks=packChunks(text);
+ const agg={textbookName:'',subject:'',units:[],questions:[]};
+ let failures=0,lastErr=null;
+ for(let i=0;i<chunks.length;i++){
+  let done=false,attempt=0;
+  while(!done&&attempt<3){
+   attempt++;
+   try{
+    const part=await aiClassifyChunk(chunks[i],'导入资料',extra);
+    if(part){ if(part.textbookName)agg.textbookName=part.textbookName; if(part.subject)agg.subject=part.subject; mergeClassification(agg,{units:part.units||[],questions:part.questions||[]}); }
+    failures=0;done=true;
+   }catch(e){
+    lastErr=e;
+    const retry=/429|rate|limit|too many/i.test(e.message||'')||e.status===429;
+    if(retry&&attempt<3){ await new Promise(r=>setTimeout(r,attempt*2500+1500)); failures++; continue; }
+    done=true;
    }
   }
-  return{ok:false,msg};}
-}function aiSampleData(){
- return{knowledge:[
-  {subject:'环境监测与分析',point:'水质监测指标',content:'水质监测主要包括物理指标（温度、浊度）、化学指标（pH、DO、COD、BOD）与生物指标。溶解氧常用碘量法测定，COD反映有机物污染总量。'},
-  {subject:'环境监测与分析',point:'水样采集与保存',content:'采样前需冲洗采样器2-3次；测定溶解氧需加固定剂并避光冷藏；不同项目保存时限不同，如pH应在现场测定。'}
+  if(i<chunks.length-1)await new Promise(r=>setTimeout(r,failures>0?4000:2000));
+ }
+ agg.units=sortUnits(agg.units);
+ const subj=agg.subject||'综合';
+ const knowledge=[];
+ agg.units.forEach(u=>{(u.points||[]).forEach(p=>{ if(p&&p.title) knowledge.push({subject:subj,unit:u.name,point:p.title,content:p.content||''}); });});
+ if(!knowledge.length&&!agg.questions.length){
+  if(lastErr)return{ok:false,msg:'AI 返回为空或解析失败：'+(lastErr.message||'请重试或更换模型'),raw:''};
+  return{ok:false,msg:'AI 未返回知识点，请重试或更换模型',raw:''};
+ }
+ return{ok:true,data:{textbookName:agg.textbookName,subject:subj,units:agg.units,knowledge:knowledge,questions:agg.questions},raw:''};
+}
+function aiSampleData(){
+ return{textbookName:'环境监测与分析（示例）',subject:'环境监测与分析',units:[
+  {name:'第1章 水质监测基础',points:[
+   {title:'水质监测指标',content:'水质监测主要包括物理指标（温度、浊度）、化学指标（pH、DO、COD、BOD）与生物指标。溶解氧常用碘量法测定，COD 反映有机物污染总量。'},
+   {title:'水样采集与保存',content:'采样前需冲洗采样器 2-3 次；测定溶解氧需加固定剂并避光冷藏；不同项目保存时限不同，如 pH 应在现场测定。'}
+  ]},
+  {name:'第2章 数据处理',points:[
+   {title:'监测数据修约',content:'按有效数字规则修约；相对偏差超过 20% 应重测；平行样测定用于评价精密度。'}
+  ]}
  ],questions:[
-  {subject:'环境监测与分析',point:'水质监测指标',type:'choice',q:'下列哪个指标反映水体的有机物污染总量？',options:['溶解氧(DO)','化学需氧量(COD)','浊度','色度'],answer:'B',explain:'COD 反映有机物污染总量，DO 反映自净能力，浊度色度属物理指标。'},
+  {subject:'环境监测与分析',point:'水质监测指标',type:'choice',q:'下列哪个指标反映水体的有机物污染总量？',options:['溶解氧(DO)','化学需氧量(COD)','浊度','色度'],answer:'B',explain:'COD 反映有机物污染总量，DO 反映自净能力。'},
   {subject:'环境监测与分析',point:'水质监测指标',type:'choice',q:'测定水中溶解氧的常用方法是？',options:['碘量法','重量法','分光光度法','滴定法'],answer:'A',explain:'碘量法是测定溶解氧的经典方法。'}
  ]};
 }
+
 function classify(text){const map=[['高等数学',/微积分|导数|积分|极限|矩阵|函数|线性/],['流体力学',/流体|雷诺|伯努利|压强|层流|湍流|管道|流速/],['环境工程微生物',/微生物|细菌|菌|活性污泥|生物处理/],['环境监测与分析',/监测|采样|分析|水质|COD|BOD|溶解氧|浓度|水污染/],['环境评价与规划',/评价|规划|环评|大气|噪声|环境影响/],['职业法规',/法规|标准|条例|法|规定|办法/]];for(const[s,re]of map){if(re.test(text))return s;}return '综合';}
 /* ---------- 智能识别：一级标题(科目)/二级标题(知识点)/正文/选择题(问题·选项·答案) ---------- */
 function knownSubjects(){const s=parsePoints(S.planner.config.subjects||'').map(x=>x.subject);S.kb.questions.forEach(q=>{if(!s.includes(q.subject))s.push(q.subject);});S.kb.knowledge.forEach(k=>{if(!s.includes(k.subject))s.push(k.subject);});return s;}
@@ -2129,34 +2127,71 @@ $('#aiExtractBtn').onclick=async()=>{
 let aiPending=null;
 function showAiPreview(data,note){
  aiPending=data;
- let kh=data.knowledge||[],qs=data.questions||[];
- openModal(`<div class="m-title">🤖 AI 提炼结果 ${note?('· '+note):''}</div>
-  <div class="sub-title">🧠 知识点（${kh.length}）</div>
-  <div id="aiKList"></div>
-  <div class="sub-title">📄 题目（${qs.length}）</div>
-  <div id="aiQList"></div>
-  <div id="aiSummary" class="soft-box" style="margin-top:10px;font-size:12.5px"></div>
-  <div class="m-actions">
-    <button class="btn danger" id="aiMergeCancel">取消</button>
-    <button class="btn primary" id="aiMergeOk">✅ 确认并入资料库</button>
-  </div>`);
- /* 渲染知识点 */
- const kSel={};kh.forEach((k,i)=>kSel[i]=1);
- const kl=$('#aiKList');if(kl){kl.innerHTML=kh.map((k,i)=>`<div class="kb-row"><button class="btn sm ghost" data-ksel="${i}" style="flex:none">${kSel[i]?'☑':'☐'}</button><div class="kb-main"><div class="kb-title">【${esc(k.point||'未分类')}】</div><div class="kb-sub">${esc((k.content||'').slice(0,80))}</div></div></div>`).join('');
-  kl.querySelectorAll('[data-ksel]').forEach(b=>b.onclick=()=>{const i=+b.dataset.ksel;kSel[i]=!kSel[i];b.textContent=kSel[i]?'☑':'☐';});}
- /* 渲染题目 */
- const qSel={};qs.forEach((q,i)=>qSel[i]=1);
- const ql=$('#aiQList');if(ql){ql.innerHTML=qs.map((q,i)=>`<div class="kb-row"><button class="btn sm ghost" data-qsel="${i}" style="flex:none">${qSel[i]?'☑':'☐'}</button><div class="kb-main"><div class="kb-title">${esc(q.q||'')}</div><div class="kb-sub">${q.type==='choice'?('答案 '+esc(q.answer)+' · '+(q.options||[]).length+' 选项'):('填空题 · 答案 '+esc(q.answer||''))}</div></div></div>`).join('');
-  ql.querySelectorAll('[data-qsel]').forEach(b=>b.onclick=()=>{const i=+b.dataset.qsel;qSel[i]=!qSel[i];b.textContent=qSel[i]?'☑':'☐';});}
- const sum=$('#aiSummary');if(sum)sum.textContent='即将并入：知识点 '+kh.length+' 条、题目 '+qs.length+' 道（可点击勾选剔除），不会覆盖已有数据。';
+ const subj=data.subject||'综合';
+ let unitsView=[];
+ if(Array.isArray(data.units)&&data.units.length){
+  unitsView=data.units.map(function(u){return {name:u.name||'未命名单元',points:(u.points||[]).map(function(p){return {title:p.title||'',content:p.content||'',on:true};})};});
+ }else if(Array.isArray(data.knowledge)&&data.knowledge.length){
+  var byUnit={};
+  data.knowledge.forEach(function(k){var uk=k.unit||'未分组';if(!byUnit[uk])byUnit[uk]=[];byUnit[uk].push({title:k.point||'',content:k.content||'',on:true});});
+  unitsView=Object.keys(byUnit).map(function(k){return {name:k,points:byUnit[k]};});
+ }
+ const qs=Array.isArray(data.questions)?data.questions:[];
+ const tbName=data.textbookName||'';
+ let html='<div class="m-title">🤖 AI 提炼结果 '+(note?('· '+note):'')+'</div>';
+ html+='<div class="soft-box" style="font-size:12.5px;margin-bottom:8px">教材：<b>'+esc(tbName||'（自动识别）')+'</b>　科目：<b>'+esc(subj)+'</b>　单元 <b>'+unitsView.length+'</b> 个　知识点 <b>'+unitsView.reduce(function(a,u){return a+u.points.length;},0)+'</b> 条'+(qs.length?('　题目 <b>'+qs.length+'</b> 道'):'')+'。可勾选剔除、直接改标题，确认后并入资料库。</div>';
+ html+='<div id="aiKList" style="max-height:46vh;overflow:auto">';
+ unitsView.forEach(function(u,ui){
+  html+='<div class="ai-unit" data-ui="'+ui+'" style="margin:8px 0;padding:8px;border:1px solid #e3ece4;border-radius:10px">';
+  html+='<div style="display:flex;align-items:center;gap:8px"><button class="btn sm ghost" data-usel="'+ui+'" style="flex:none">☑</button><input class="inp" data-uname="'+ui+'" value="'+esc(u.name)+'" style="flex:1;font-weight:600"></div>';
+  u.points.forEach(function(p,pi){
+   html+='<div class="kb-row" style="margin-top:6px"><button class="btn sm ghost" data-ksel="'+ui+':'+pi+'" style="flex:none">☑</button><div class="kb-main"><input class="kb-inp" data-ktitle="'+ui+':'+pi+'" value="'+esc(p.title)+'" style="width:100%;border:none;border-bottom:1px dashed #cdd;border-radius:0;padding:2px 0;font-size:13px;background:transparent"><div class="kb-sub">'+esc((p.content||'').slice(0,70))+'</div></div></div>';
+  });
+  html+='</div>';
+ });
+ html+='</div>';
+ html+='<div class="sub-title" style="margin-top:10px">📄 题目（'+qs.length+'）'+(qs.length?'<span class="hint">（默认全选，可剔除）</span>':'')+'</div>';
+ html+='<div id="aiQList">';
+ qs.forEach(function(q,i){html+='<div class="kb-row"><button class="btn sm ghost" data-qsel="'+i+'" style="flex:none">☑</button><div class="kb-main"><div class="kb-title">'+esc(q.q||'')+'</div><div class="kb-sub">'+esc(q.type==='choice'?('答案 '+(q.answer||'')+' · '+((q.options||[]).length)+' 选项'):('填空题 · 答案 '+esc(q.answer||'')))+'</div></div></div>';});
+ html+='</div>';
+ html+='<label class="hint" style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer"><input type="checkbox" id="aiSumChk" checked style="width:18px;height:18px;accent-color:#2F5D4C"> 并入后为每条知识点生成 AI 摘要（消耗模型额度）</label>';
+ html+='<div id="aiSummary" class="soft-box" style="margin-top:8px;font-size:12.5px"></div>';
+ html+='<div class="m-actions"><button class="btn danger" id="aiMergeCancel">取消</button><button class="btn primary" id="aiMergeOk">✅ 确认并入资料库</button></div>';
+ openModal(html);
+ const sum=$('#aiSummary');if(sum)sum.textContent='即将并入：知识点 '+unitsView.reduce(function(a,u){return a+u.points.length;},0)+' 条、题目 '+qs.length+' 道，不会覆盖已有数据。';
+ /* 单元全选/取消 */
+ $$('#aiKList [data-usel]').forEach(function(b){b.onclick=function(){
+  var ui=+b.dataset.usel;var on=b.textContent==='☑';
+  unitsView[ui].points.forEach(function(p){p.on=on;});
+  b.textContent=on?'☐':'☑';
+  $$('#aiKList [data-ksel]').forEach(function(x){var kv=x.dataset.ksel.split(':');if(+kv[0]===ui)x.textContent=on?'☐':'☑';});
+ };});
+ /* 单点勾选 */
+ $$('#aiKList [data-ksel]').forEach(function(b){b.onclick=function(){var kv=b.dataset.ksel.split(':');var ui=+kv[0],pi=+kv[1];unitsView[ui].points[pi].on=!unitsView[ui].points[pi].on;b.textContent=unitsView[ui].points[pi].on?'☑':'☐';};});
+ /* 编辑单元名 / 知识点标题 */
+ $$('#aiKList [data-uname]').forEach(function(inp){inp.oninput=function(){unitsView[+inp.dataset.uname].name=inp.value;};});
+ $$('#aiKList [data-ktitle]').forEach(function(inp){inp.oninput=function(){var kv=inp.dataset.ktitle.split(':');unitsView[+kv[0]].points[+kv[1]].title=inp.value;};});
+ /* 题目勾选 */
+ const qSel={};qs.forEach(function(q,i){qSel[i]=1;});
+ $$('#aiQList [data-qsel]').forEach(function(b){b.onclick=function(){var i=+b.dataset.qsel;qSel[i]=!qSel[i];b.textContent=qSel[i]?'☑':'☐';};});
  $('#aiMergeCancel').onclick=closeModal;
- $('#aiMergeOk').onclick=()=>{
-  let kc=0,qc=0;
-  (data.knowledge||[]).forEach((k,i)=>{if(kSel[i]&&k.point&&k.content){S.kb.knowledge.push({id:u(),subject:k.subject||'综合',point:k.point,content:k.content});kc++;}});
-  (data.questions||[]).forEach((q,i)=>{if(qSel[i]&&q.q){S.kb.questions.push({id:u(),subject:q.subject||'综合',point:q.point||'',q:q.q,options:(q.options&&q.options.length>=2)?q.options:[],answer:q.answer||'',explain:q.explain||'',type:(q.type==='blank'?'blank':'choice'),source:'AI'});qc++;}});
+ $('#aiMergeOk').onclick=function(){
+  var kc=0,qc=0,built=[];
+  unitsView.forEach(function(u){var uname=u.name.trim()||'未命名单元';(u.points||[]).forEach(function(p){if(p.on&&p.title.trim()){var obj={id:u(),subject:subj,unit:uname,point:p.title.trim(),content:p.content||'',summary:''};S.kb.knowledge.push(obj);built.push(obj);kc++;}});});
+  qs.forEach(function(q,i){if(qSel[i]&&q.q){S.kb.questions.push({id:u(),subject:q.subject||subj,point:q.point||'',q:q.q,options:(q.options&&q.options.length>=2)?q.options:[],answer:q.answer||'',explain:q.explain||'',type:(q.type==='blank'?'blank':'choice'),source:'AI'});qc++;}});
   save();closeModal();renderFolder();renderBank();renderQuizColumns();renderWrong();toast('✅ 已并入 '+kc+' 知识点、'+qc+' 题目');
+  var doSum=($('#aiSumChk')?$('#aiSumChk').checked:false);
+  if(doSum&&built.length){
+   toast('正在为 '+built.length+' 条知识点生成 AI 摘要…');
+   (function loop(idx){
+    if(idx>=built.length){toast('✅ 已为 '+built.length+' 条知识点生成摘要');return;}
+    var item=built[idx];
+    aiSummarizePoint(item.point,item.content).then(function(s){if(s){item.summary=s;save();}loop(idx+1);}).catch(function(){loop(idx+1);});
+   })(0);
+  }
  };
 }
+
 function renderWrong(){
  const ws=S.kb.wrongs;
  const wc=$('#wrongCnt');if(wc)wc.textContent=ws.length+' 题';
@@ -2249,7 +2284,7 @@ function renderFolder(){
   if(!items.length&&!kn.length){toast('该文件夹暂无内容');return;}
   let html=`<div class="m-title">📂 ${esc(subj)} / ${esc(pt==='__other__'?'其他':pt)}</div>`;
   /* 知识点素材：可勾选批量删除 / 单条编辑 / 删除 */
-  if(kn.length)html+=`<div class="sub-title">🧠 知识点（${kn.length}）</div>`+kn.map(k=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bk="${k.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">${esc(k.content)}</div></div><button class="btn sm ghost" data-kedit="${k.id}">✏️</button><button class="btn sm danger" data-kdel="${k.id}">🗑</button></div>`).join('');
+  if(kn.length)html+=`<div class="sub-title">🧠 知识点（${kn.length}）</div>`+kn.map(k=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bk="${k.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">'+(k.unit?('【'+esc(k.unit)+'】'):'')+esc(k.content)+'</div>'+(k.summary?('<div class="kb-sub" style="white-space:pre-line">'+esc(k.summary)+'</div>'):'')</div><button class="btn sm ghost" data-kedit="${k.id}">✏️</button><button class="btn sm danger" data-kdel="${k.id}">🗑</button></div>`).join('');
   /* 题目：可勾选批量删除 / 编辑 / 删除 / 收藏 */
   if(items.length)html+=`<div class="sub-title">📄 题目（${items.length}）</div>`+items.map(q=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bq="${q.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">${esc(q.q)}</div><div class="kb-sub">${q.type==='choice'?('答案：'+esc(q.answer||'')):('答案：'+esc(q.a))}</div></div><button class="btn sm ghost" data-fav2="${q.id}">${q.fav?'⭐':'☆'}</button><button class="btn sm ghost" data-qedit="${q.id}">✏️</button><button class="btn sm danger" data-qdel="${q.id}">🗑</button></div>`).join('');
   if(kn.length||items.length)html+=`<div class="m-actions" style="align-items:center"><button class="btn sm danger" id="fBulkDel">🗑 删除选中</button><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer"><input type="checkbox" id="fSelAll" style="width:18px;height:18px;accent-color:#2F5D4C">全选</label><button class="btn primary" style="flex:1" id="fClose">关闭</button></div>`;
@@ -2544,11 +2579,124 @@ async function renderVersionList(){const box=$('#verList');if(!box)return;let li
   if(!confirm('恢复到这个版本？当前数据会被整体覆盖（恢复前会自动备份当前状态，可再撤销）。'))return;
   const r=await restoreVersion(id,src);if(r.ok){toast('已恢复该版本，即将刷新');setTimeout(()=>location.reload(),600);}else toast('恢复失败：'+(r.msg||''));};});}
 
+/* ============ 参考教务工作台：教材→单元→知识点 结构化识别 ============ */
+/* 本地识别单元/章节边界（第N章/Unit N/第N单元/第五章/模块N 等） */
+function detectUnitSegments(text){
+  var lines=String(text||'').split(/\r?\n/).map(function(s){return s.trim();}).filter(Boolean);
+  var marks=[],seen={};
+  function pushRaw(t){var k=t.toLowerCase();if(!seen[k]&&t.length<=40&&t.length>=2){seen[k]=1;marks.push(t);}}
+  for(var i=0;i<lines.length;i++){
+    var l=lines[i];
+    if(l.indexOf('。')>-1||l.length>40)continue;
+    var m=l.match(/^(第\s*[一二三四五六七八九十百零\d]+\s*(?:章|单元|讲|课|节|篇|部分|模块|课题|项目|编))/i)
+      ||l.match(/^(Unit|Chapter|Module|Lesson|Part|Section|Book|Term|Stage)\s*\d+/i)
+      ||l.match(/^(第\s*[一二三四五六七八九十]+\s*部分)/i);
+    if(m){pushRaw(l.replace(/[：:]\s*$/,'').trim());continue;}
+    var h2=l.match(/^([一二三四五六七八九十]{1,3})[、.．]\s*(.{1,18})$/);
+    if(h2&&l.indexOf('：')<0&&l.indexOf(':')<0){pushRaw(h2[2].trim());continue;}
+  }
+  if(!marks.length)return null;
+  var segs=[],pre='',cursor=0;
+  for(var j=0;j<marks.length;j++){
+    var title=marks[j];
+    var idx=text.indexOf(title,cursor);
+    if(idx<0)continue;
+    if(!segs.length){pre=text.slice(0,idx);}
+    else{segs[segs.length-1].body=text.slice(cursor,idx);}
+    segs.push({title:title,body:''});
+    cursor=idx+title.length;
+  }
+  if(!segs.length)return null;
+  segs[segs.length-1].body=text.slice(cursor);
+  return {pre:pre,segs:segs};
+}
+function detectUnitTitles(text){var d=detectUnitSegments(text);return d?d.segs.map(function(s){return s.title;}):[];}
+function cnNum(s){if(/^\d+$/.test(s))return s;var map={零:0,一:1,二:2,两:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9};if(s.length<=2&&[].every.call(s,function(c){return c in map;}))return String(map[s]);if(s.indexOf('十')>-1){var a=s.split('十');var tens=a[0]===''?1:(map[a[0]]||0);var ones=a[1]===''?0:(map[a[1]]||0);return String(tens*10+ones);}return s;}
+function unitKey(name){var t=String(name||'').trim().toLowerCase();var m=t.match(/^(?:units?|lessons?|chapters?|modules?|parts?|books?|terms?|stages?)\s*(\d+)|第\s*(\d+|[一二三四五六七八九十零两]+)\s*(?:单元|章|课|节|讲|课时)/);if(m)return cnNum(m[1]||m[2]||'');return t;}
+function sortUnits(units){return units.map(function(u,i){var k=unitKey(u.name).match(/\d+/);return {u:u,i:i,k:k?Number(k[0]):Number.MAX_SAFE_INTEGER};}).sort(function(a,b){return a.k-b.k||a.i-b.i;}).map(function(x){return x.u;});}
+function sliceText(s,size,overlap){if(s.length<=size)return [s];var out=[],i=0;while(i<s.length){out.push(s.slice(i,i+size));i+=size-overlap;}return out;}
+/* 按单元边界+字数把长文档切为若干块（每块≤5单元/≤8000字，上限6块），无结构则按字数硬切 */
+function packChunks(text){
+  var d=detectUnitSegments(text);var CH=8000;
+  if(d&&d.segs.length){
+    var chunks=[],buf=[],units=0,chars=0;
+    var flush=function(){if(buf.length){chunks.push(buf.join('\n\n'));buf=[];units=0;chars=0;}};
+    for(var i=0;i<d.segs.length;i++){
+      var seg=d.segs[i];
+      var head='=== 单元：'+seg.title+' ===\n';
+      var budget=Math.max(CH-head.length,800);
+      var pieces=seg.body.length>budget?sliceText(seg.body,budget,300):[seg.body];
+      for(var p=0;p<pieces.length;p++){
+        var t=head+pieces[p];
+        if(buf.length&&(units+1>5||chars+t.length>CH))flush();
+        buf.push(t);units++;chars+=t.length;
+      }
+    }
+    flush();
+    if(chunks.length)return chunks.slice(0,6);
+  }
+  return sliceText(text,CH,300).slice(0,6);
+}
+function aiClassifyChunk(textChunk,fileName,extra){
+  var c=aiCfg();
+  var lines=[
+    '请把下面这份教材/讲义内容分析归类为知识库结构。',
+    '',
+    '文档来源：'+(fileName||'导入资料'),
+    '',
+    textChunk+(extra?('\n\n补充背景：'+extra):''),
+    '',
+    '严格按照如下 JSON 输出（不要任何多余文字或代码块标记）：',
+    '{"textbookName":"教材名","subject":"科目或空串","units":[{"name":"单元名（原样保留 === 单元：XXX === 标记里的完整名称）","points":[{"title":"知识点标题","content":"该知识点核心内容，忠于原文，100-250字，可背诵"}]}],"questions":[{"subject":"科目","point":"知识点标题","type":"choice|blank","q":"题干","options":["A","B","C","D"],"answer":"答案","explain":"解析"}]}',
+    '',
+    '要求：',
+    '1. 文本里出现的「=== 单元：XXX ===」是单元边界标记，必须严格按它分组，每个单元的知识点只能来自该标记之后文本，严禁跨单元混放；',
+    '2. 标记后无内容时该单元 points 为空数组，但单元必须保留；',
+    '3. 知识点拆细：一个概念/公式/句型/课文要点各算一条，每个单元 3-8 条；',
+    '4. content 写原文要点，禁止写「原文页码/目录」等元描述；',
+    '5. 提取 3-10 条知识点，和尽可能多的选择题（4选项）与少量填空题；',
+    '6. subject 用最贴切一级科目名，不要虚构原文没有的内容；',
+    '7. JSON 必须合法，字符串内不得含未转义引号或换行。'
+  ];
+  var body={model:c.model,messages:[{role:'system',content:'你是资深教研老师，负责把教材/讲义导入知识库，输出结构化 JSON。'},{role:'user',content:lines.join('\n')}],temperature:0.3,jsonMode:true};
+  return aiFetch(body).then(function(r){
+    if(!r.ok){var msg='HTTP '+(r.status||'');var j=r.json;msg=(j.error&&(j.error.message||j.error))||msg;throw new Error(msg);}
+    var content=extractAIContent(r.json)||'';
+    var clean=content.trim().replace(/^```(?:json)?\s*/i,'').replace(/```$/,'') .trim();
+    var m=clean.match(/\{[\s\S]*\}/);
+    if(m){try{return JSON.parse(m[0]);}catch(e){}}
+    return null;
+  });
+}
+function mergeClassification(base,next){
+  if(!base.textbookName&&next.textbookName)base.textbookName=next.textbookName;
+  if(!base.subject&&next.subject)base.subject=next.subject;
+  (next.units||[]).forEach(function(u){
+    if(!u||!u.name)return;
+    var key=unitKey(u.name);
+    var cur=base.units.filter(function(x){return unitKey(x.name)===key;})[0];
+    if(!cur){cur={name:u.name,points:[]};base.units.push(cur);}
+    (u.points||[]).forEach(function(p){if(p&&p.title&&!cur.points.some(function(x){return x.title===p.title;}))cur.points.push({title:p.title,content:p.content||''});});
+  });
+  (next.questions||[]).forEach(function(q){base.questions.push(q);});
+}
+function aiSummarizePoint(title,content){
+  var c=aiCfg();
+  var body={model:c.model,messages:[
+    {role:'system',content:'你是教研老师。把下面这个知识点整理成一段结构化摘要（一句话定位 + 3-5 条要点 + 常见易错点），直接输出 Markdown 文本，不要 JSON 或说明。'},
+    {role:'user',content:'知识点标题：'+title+'\n原始要点：\n'+(content||'').slice(0,2000)+'\n\n请整理为可复用摘要。'}
+  ],temperature:0.4};
+  return aiFetch(body).then(function(r){if(!r.ok)return '';return (extractAIContent(r.json)||'').trim();});
+}
+
 /* ================= 设置 ================= */
-function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</div>
+function openSettings(){openModal(`<style>.set-details>summary{font-weight:600;cursor:pointer;color:#5A7A5A;padding:7px 2px;list-style:none}.set-details>summary::-webkit-details-marker{display:none}.set-details>summary:before{content:"▸ ";color:#2F5D4C}.set-details[open]>summary:before{content:"▾ "}.set-details{margin:8px 0;border:1px solid #e3ece4;border-radius:10px;padding:4px 14px 8px}.set-details[open]{padding-bottom:12px}</style><div class="m-title">⚙️ 工作台设置</div>
+<details class="set-details" open><summary>① 考试信息</summary>
  <label class="lbl">考试名称</label><input class="inp" id="setExamName" value="${esc(S.exam.name)}">
  <label class="lbl">笔试日期</label><input class="inp" id="setExamDate" type="date" value="${S.exam.date}">
  <div style="border-top:1.5px dashed #D8E8DA;margin:14px 0 4px"></div>
+</details>
+<details class="set-details"><summary>② 云同步（Supabase）</summary>
  <div class="panel-head">☁️ Supabase 云同步</div>
  <label class="lbl">Supabase URL</label><input class="inp" id="sbUrl" value="${esc(S.cloud.supabaseUrl)}" placeholder="https://xxxx.supabase.co">
  <label class="lbl">anon 密钥（public key）</label><input class="inp" id="sbKey" value="${esc(S.cloud.supabaseKey)}" placeholder="eyJhbGciOi...">
@@ -2563,11 +2711,15 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
  </div>
  <p class="sync-status" id="syncStatus">尚未同步。建表 SQL（请在 Supabase SQL 编辑器执行）：<br><code style="font-size:11px;line-height:1.5">create table if not exists beikao_workbench(id text primary key,data jsonb not null,updated_at timestamptz default now());<br>alter table beikao_workbench enable row level security;<br>create policy beikao_rw on beikao_workbench for all using (true) with check (true);</code><br>行 key=<code>beikao:main</code>；AI 私钥与 supabase 密钥不落库。</p>
  <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
+</details>
+<details class="set-details"><summary>③ 数据版本与回滚</summary>
  <div class="panel-head">🕘 数据版本（本地+云端双份，可回滚）</div>
  <div class="btn-row"><button class="btn sm" id="verCreate">立即创建版本</button><button class="btn sm ghost" id="verRefresh">刷新</button></div>
  <div class="ver-list" id="verList"><div class="hint" style="padding:10px">加载中…</div></div>
  <p class="hint" style="margin-top:6px">上传成功后自动留档；本地保留最近 ${LOCAL_VKEEP} 个、云端 ${CLOUD_VKEEP} 个。云端版本需先建表（缺表不影响本地版本与业务同步）：<br><code style="font-size:11px;line-height:1.5">create table if not exists beikao_snapshots(id text primary key,created_at timestamptz default now(),label text,auto boolean,data jsonb);<br>alter table beikao_snapshots enable row level security;<br>create policy beikao_snap_rw on beikao_snapshots for all using (true) with check (true);</code></p>
  <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
+</details>
+<details class="set-details"><summary>④ 识别速度（OCR 并发）</summary>
  <div class="panel-head">🔍 图片型 PDF 识别速度</div>
  <label class="lbl">OCR 并发数</label>
  <select class="inp" id="sbOcr">
@@ -2577,6 +2729,8 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
  </select>
  <p class="hint" style="margin:8px 0 0">同时开几个识别进程处理扫描版 PDF。页数多、电脑配置好可选 5 档；老电脑或内存小建议 1 档。</p>
  <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
+</details>
+<details class="set-details"><summary>⑤ AI 提炼与视觉模型</summary>
  <div class="panel-head">🤖 AI 自动提炼知识点</div>
  <div class="soft-box" style="font-size:12.5px;margin-bottom:8px">⚠️ sensnova 不开放网页直连（会报 CORS / fetch failed）。请<b>先在本地运行中转到代理</b>，再填地址。详见下方「使用说明」。</div>
  <div style="font-weight:600;margin:10px 0 4px;color:#5A7A5A">通用 AI（文本模型）</div>
@@ -2619,6 +2773,7 @@ function openSettings(){openModal(`<div class="m-title">⚙️ 工作台设置</
  </div>
  <p class="sync-status" id="aiStatus">未测试。导入教材 / PPT 后，可点「AI 提炼」自动抽取知识点与题目。</p>
  
+</details>
  <div style="border-top:1.5px dashed #D8E8DA;margin:12px 0 4px"></div>
  <div class="m-actions"><button class="btn primary" id="setSave">保存设置</button><button class="btn ghost" id="setExport">📤 导出备份</button><button class="btn ghost" id="setImport">📥 导入备份</button></div>
  <input type="file" id="setImportFile" accept=".json" style="display:none">
