@@ -1750,7 +1750,7 @@ async function aiExtractKnowledge(text,extra='',testOnly=false){
  }
  /* 长文档分块 + 逐块归类 + 合并 + 429 重试（参考教务 classifyImportedDocument） */
  const chunks=packChunks(text);
- const agg={textbookName:'',subject:'',units:[],questions:[]};
+ const agg={textbookName:'',subject:'',subjects:[],questions:[]};
  let failures=0,lastErr=null;
  for(let i=0;i<chunks.length;i++){
   let done=false,attempt=0;
@@ -1758,7 +1758,7 @@ async function aiExtractKnowledge(text,extra='',testOnly=false){
    attempt++;
    try{
     const part=await aiClassifyChunk(chunks[i],'导入资料',extra);
-    if(part){ if(part.textbookName)agg.textbookName=part.textbookName; if(part.subject)agg.subject=part.subject; mergeClassification(agg,{units:part.units||[],questions:part.questions||[]}); }
+    if(part){ if(part.textbookName)agg.textbookName=part.textbookName; if(part.subject)agg.subject=part.subject; mergeClassification(agg,{subjects:part.subjects||[],questions:part.questions||[]}); }
     failures=0;done=true;
    }catch(e){
     lastErr=e;
@@ -1769,18 +1769,18 @@ async function aiExtractKnowledge(text,extra='',testOnly=false){
   }
   if(i<chunks.length-1)await new Promise(r=>setTimeout(r,failures>0?4000:2000));
  }
- agg.units=sortUnits(agg.units);
+ agg.subjects=sortSubjects(agg.subjects);
  const subj=agg.subject||'综合';
  const knowledge=[];
- agg.units.forEach(u=>{(u.points||[]).forEach(p=>{ if(p&&p.title) knowledge.push({subject:subj,unit:u.name,point:p.title,content:p.content||''}); });});
+ agg.subjects.forEach(s=>{(s.points||[]).forEach(p=>{ if(p&&p.title) knowledge.push({subject:s.name,point:p.title,content:p.content||''}); });});
  if(!knowledge.length&&!agg.questions.length){
   if(lastErr)return{ok:false,msg:'AI 返回为空或解析失败：'+(lastErr.message||'请重试或更换模型'),raw:''};
   return{ok:false,msg:'AI 未返回知识点，请重试或更换模型',raw:''};
  }
- return{ok:true,data:{textbookName:agg.textbookName,subject:subj,units:agg.units,knowledge:knowledge,questions:agg.questions},raw:''};
+ return{ok:true,data:{textbookName:agg.textbookName,subject:subj,subjects:agg.subjects,knowledge:knowledge,questions:agg.questions},raw:''};
 }
 function aiSampleData(){
- return{textbookName:'环境监测与分析（示例）',subject:'环境监测与分析',units:[
+ return{textbookName:'环境监测与分析（示例）',subject:'环境监测与分析',subjects:[
   {name:'第1章 水质监测基础',points:[
    {title:'水质监测指标',content:'水质监测主要包括物理指标（温度、浊度）、化学指标（pH、DO、COD、BOD）与生物指标。溶解氧常用碘量法测定，COD 反映有机物污染总量。'},
    {title:'水样采集与保存',content:'采样前需冲洗采样器 2-3 次；测定溶解氧需加固定剂并避光冷藏；不同项目保存时限不同，如 pH 应在现场测定。'}
@@ -2128,20 +2128,20 @@ let aiPending=null;
 function showAiPreview(data,note){
  aiPending=data;
  const subj=data.subject||'综合';
- let unitsView=[];
- if(Array.isArray(data.units)&&data.units.length){
-  unitsView=data.units.map(function(u){return {name:u.name||'未命名单元',points:(u.points||[]).map(function(p){return {title:p.title||'',content:p.content||'',on:true};})};});
+ let subjectsView=[];
+ if(Array.isArray(data.subjects)&&data.subjects.length){
+  subjectsView=data.subjects.map(function(u){return {name:u.name||'未命名科目',points:(u.points||[]).map(function(p){return {title:p.title||'',content:p.content||'',on:true};})};});
  }else if(Array.isArray(data.knowledge)&&data.knowledge.length){
-  var byUnit={};
-  data.knowledge.forEach(function(k){var uk=k.unit||'未分组';if(!byUnit[uk])byUnit[uk]=[];byUnit[uk].push({title:k.point||'',content:k.content||'',on:true});});
-  unitsView=Object.keys(byUnit).map(function(k){return {name:k,points:byUnit[k]};});
+  var bySubj={};
+  data.knowledge.forEach(function(k){var uk=k.subject||k.unit||'未分组';if(!bySubj[uk])bySubj[uk]=[];bySubj[uk].push({title:k.point||'',content:k.content||'',on:true});});
+  subjectsView=Object.keys(bySubj).map(function(k){return {name:k,points:bySubj[k]};});
  }
  const qs=Array.isArray(data.questions)?data.questions:[];
  const tbName=data.textbookName||'';
  let html='<div class="m-title">🤖 AI 提炼结果 '+(note?('· '+note):'')+'</div>';
- html+='<div class="soft-box" style="font-size:12.5px;margin-bottom:8px">教材：<b>'+esc(tbName||'（自动识别）')+'</b>　科目：<b>'+esc(subj)+'</b>　单元 <b>'+unitsView.length+'</b> 个　知识点 <b>'+unitsView.reduce(function(a,u){return a+u.points.length;},0)+'</b> 条'+(qs.length?('　题目 <b>'+qs.length+'</b> 道'):'')+'。可勾选剔除、直接改标题，确认后并入资料库。</div>';
+ html+='<div class="soft-box" style="font-size:12.5px;margin-bottom:8px">教材：<b>'+esc(tbName||'（自动识别）')+'</b>　科目：<b>'+esc(subj)+'</b>　科目 <b>'+subjectsView.length+'</b> 个　知识点 <b>'+subjectsView.reduce(function(a,u){return a+u.points.length;},0)+'</b> 条'+(qs.length?('　题目 <b>'+qs.length+'</b> 道'):'')+'。可勾选剔除、直接改标题，确认后并入资料库。</div>';
  html+='<div id="aiKList" style="max-height:46vh;overflow:auto">';
- unitsView.forEach(function(u,ui){
+ subjectsView.forEach(function(u,ui){
   html+='<div class="ai-unit" data-ui="'+ui+'" style="margin:8px 0;padding:8px;border:1px solid #e3ece4;border-radius:10px">';
   html+='<div style="display:flex;align-items:center;gap:8px"><button class="btn sm ghost" data-usel="'+ui+'" style="flex:none">☑</button><input class="inp" data-uname="'+ui+'" value="'+esc(u.name)+'" style="flex:1;font-weight:600"></div>';
   u.points.forEach(function(p,pi){
@@ -2158,26 +2158,26 @@ function showAiPreview(data,note){
  html+='<div id="aiSummary" class="soft-box" style="margin-top:8px;font-size:12.5px"></div>';
  html+='<div class="m-actions"><button class="btn danger" id="aiMergeCancel">取消</button><button class="btn primary" id="aiMergeOk">✅ 确认并入资料库</button></div>';
  openModal(html);
- const sum=$('#aiSummary');if(sum)sum.textContent='即将并入：知识点 '+unitsView.reduce(function(a,u){return a+u.points.length;},0)+' 条、题目 '+qs.length+' 道，不会覆盖已有数据。';
+ const sum=$('#aiSummary');if(sum)sum.textContent='即将并入：知识点 '+subjectsView.reduce(function(a,u){return a+u.points.length;},0)+' 条、题目 '+qs.length+' 道，不会覆盖已有数据。';
  /* 单元全选/取消 */
  $$('#aiKList [data-usel]').forEach(function(b){b.onclick=function(){
   var ui=+b.dataset.usel;var on=b.textContent==='☑';
-  unitsView[ui].points.forEach(function(p){p.on=on;});
+  subjectsView[ui].points.forEach(function(p){p.on=on;});
   b.textContent=on?'☐':'☑';
   $$('#aiKList [data-ksel]').forEach(function(x){var kv=x.dataset.ksel.split(':');if(+kv[0]===ui)x.textContent=on?'☐':'☑';});
  };});
  /* 单点勾选 */
- $$('#aiKList [data-ksel]').forEach(function(b){b.onclick=function(){var kv=b.dataset.ksel.split(':');var ui=+kv[0],pi=+kv[1];unitsView[ui].points[pi].on=!unitsView[ui].points[pi].on;b.textContent=unitsView[ui].points[pi].on?'☑':'☐';};});
+ $$('#aiKList [data-ksel]').forEach(function(b){b.onclick=function(){var kv=b.dataset.ksel.split(':');var ui=+kv[0],pi=+kv[1];subjectsView[ui].points[pi].on=!subjectsView[ui].points[pi].on;b.textContent=subjectsView[ui].points[pi].on?'☑':'☐';};});
  /* 编辑单元名 / 知识点标题 */
- $$('#aiKList [data-uname]').forEach(function(inp){inp.oninput=function(){unitsView[+inp.dataset.uname].name=inp.value;};});
- $$('#aiKList [data-ktitle]').forEach(function(inp){inp.oninput=function(){var kv=inp.dataset.ktitle.split(':');unitsView[+kv[0]].points[+kv[1]].title=inp.value;};});
+ $$('#aiKList [data-uname]').forEach(function(inp){inp.oninput=function(){subjectsView[+inp.dataset.uname].name=inp.value;};});
+ $$('#aiKList [data-ktitle]').forEach(function(inp){inp.oninput=function(){var kv=inp.dataset.ktitle.split(':');subjectsView[+kv[0]].points[+kv[1]].title=inp.value;};});
  /* 题目勾选 */
  const qSel={};qs.forEach(function(q,i){qSel[i]=1;});
  $$('#aiQList [data-qsel]').forEach(function(b){b.onclick=function(){var i=+b.dataset.qsel;qSel[i]=!qSel[i];b.textContent=qSel[i]?'☑':'☐';};});
  $('#aiMergeCancel').onclick=closeModal;
  $('#aiMergeOk').onclick=function(){
   var kc=0,qc=0,built=[];
-  unitsView.forEach(function(u){var uname=u.name.trim()||'未命名单元';(u.points||[]).forEach(function(p){if(p.on&&p.title.trim()){var obj={id:u(),subject:subj,unit:uname,point:p.title.trim(),content:p.content||'',summary:''};S.kb.knowledge.push(obj);built.push(obj);kc++;}});});
+  subjectsView.forEach(function(u){var uname=u.name.trim()||'未命名科目';(u.points||[]).forEach(function(p){if(p.on&&p.title.trim()){var obj={id:u(),subject:uname,point:p.title.trim(),content:p.content||'',summary:''};S.kb.knowledge.push(obj);built.push(obj);kc++;}});});
   qs.forEach(function(q,i){if(qSel[i]&&q.q){S.kb.questions.push({id:u(),subject:q.subject||subj,point:q.point||'',q:q.q,options:(q.options&&q.options.length>=2)?q.options:[],answer:q.answer||'',explain:q.explain||'',type:(q.type==='blank'?'blank':'choice'),source:'AI'});qc++;}});
   save();closeModal();renderFolder();renderBank();renderQuizColumns();renderWrong();toast('✅ 已并入 '+kc+' 知识点、'+qc+' 题目');
   var doSum=($('#aiSumChk')?$('#aiSumChk').checked:false);
@@ -2284,7 +2284,7 @@ function renderFolder(){
   if(!items.length&&!kn.length){toast('该文件夹暂无内容');return;}
   let html=`<div class="m-title">📂 ${esc(subj)} / ${esc(pt==='__other__'?'其他':pt)}</div>`;
   /* 知识点素材：可勾选批量删除 / 单条编辑 / 删除 */
-  if(kn.length)html+=`<div class="sub-title">🧠 知识点（${kn.length}）</div>`+kn.map(k=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bk="${k.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">'+(k.unit?('【'+esc(k.unit)+'】'):'')+esc(k.content)+'</div>'+(k.summary?('<div class="kb-sub" style="white-space:pre-line">'+esc(k.summary)+'</div>'):'')</div><button class="btn sm ghost" data-kedit="${k.id}">✏️</button><button class="btn sm danger" data-kdel="${k.id}">🗑</button></div>`).join('');
+  if(kn.length)html+=`<div class="sub-title">🧠 知识点（${kn.length}）</div>`+kn.map(k=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bk="${k.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">'+(k.subject?('【'+esc(k.subject)+'】'):(k.unit?('【'+esc(k.unit)+'】'):''))+esc(k.content)+'</div>'+(k.summary?('<div class="kb-sub" style="white-space:pre-line">'+esc(k.summary)+'</div>'):'')</div><button class="btn sm ghost" data-kedit="${k.id}">✏️</button><button class="btn sm danger" data-kdel="${k.id}">🗑</button></div>`).join('');
   /* 题目：可勾选批量删除 / 编辑 / 删除 / 收藏 */
   if(items.length)html+=`<div class="sub-title">📄 题目（${items.length}）</div>`+items.map(q=>`<div class="kb-row"><input type="checkbox" class="kb-bulk" data-bq="${q.id}" style="width:18px;height:18px;accent-color:#2F5D4C;flex:none"><div class="kb-main"><div class="kb-title">${esc(q.q)}</div><div class="kb-sub">${q.type==='choice'?('答案：'+esc(q.answer||'')):('答案：'+esc(q.a))}</div></div><button class="btn sm ghost" data-fav2="${q.id}">${q.fav?'⭐':'☆'}</button><button class="btn sm ghost" data-qedit="${q.id}">✏️</button><button class="btn sm danger" data-qdel="${q.id}">🗑</button></div>`).join('');
   if(kn.length||items.length)html+=`<div class="m-actions" style="align-items:center"><button class="btn sm danger" id="fBulkDel">🗑 删除选中</button><label class="hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer"><input type="checkbox" id="fSelAll" style="width:18px;height:18px;accent-color:#2F5D4C">全选</label><button class="btn primary" style="flex:1" id="fClose">关闭</button></div>`;
@@ -2581,7 +2581,7 @@ async function renderVersionList(){const box=$('#verList');if(!box)return;let li
 
 /* ============ 参考教务工作台：教材→单元→知识点 结构化识别 ============ */
 /* 本地识别单元/章节边界（第N章/Unit N/第N单元/第五章/模块N 等） */
-function detectUnitSegments(text){
+function detectSubjectSegments(text){
   var lines=String(text||'').split(/\r?\n/).map(function(s){return s.trim();}).filter(Boolean);
   var marks=[],seen={};
   function pushRaw(t){var k=t.toLowerCase();if(!seen[k]&&t.length<=40&&t.length>=2){seen[k]=1;marks.push(t);}}
@@ -2610,20 +2610,20 @@ function detectUnitSegments(text){
   segs[segs.length-1].body=text.slice(cursor);
   return {pre:pre,segs:segs};
 }
-function detectUnitTitles(text){var d=detectUnitSegments(text);return d?d.segs.map(function(s){return s.title;}):[];}
+function detectSubjectTitles(text){var d=detectSubjectSegments(text);return d?d.segs.map(function(s){return s.title;}):[];}
 function cnNum(s){if(/^\d+$/.test(s))return s;var map={零:0,一:1,二:2,两:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9};if(s.length<=2&&[].every.call(s,function(c){return c in map;}))return String(map[s]);if(s.indexOf('十')>-1){var a=s.split('十');var tens=a[0]===''?1:(map[a[0]]||0);var ones=a[1]===''?0:(map[a[1]]||0);return String(tens*10+ones);}return s;}
-function unitKey(name){var t=String(name||'').trim().toLowerCase();var m=t.match(/^(?:units?|lessons?|chapters?|modules?|parts?|books?|terms?|stages?)\s*(\d+)|第\s*(\d+|[一二三四五六七八九十零两]+)\s*(?:单元|章|课|节|讲|课时)/);if(m)return cnNum(m[1]||m[2]||'');return t;}
-function sortUnits(units){return units.map(function(u,i){var k=unitKey(u.name).match(/\d+/);return {u:u,i:i,k:k?Number(k[0]):Number.MAX_SAFE_INTEGER};}).sort(function(a,b){return a.k-b.k||a.i-b.i;}).map(function(x){return x.u;});}
+function subjectKey(name){var t=String(name||'').trim().toLowerCase();var m=t.match(/^(?:units?|lessons?|chapters?|modules?|parts?|books?|terms?|stages?)\s*(\d+)|第\s*(\d+|[一二三四五六七八九十零两]+)\s*(?:单元|章|课|节|讲|课时)/);if(m)return cnNum(m[1]||m[2]||'');return t;}
+function sortSubjects(subjects){return subjects.map(function(u,i){var k=subjectKey(u.name).match(/\d+/);return {u:u,i:i,k:k?Number(k[0]):Number.MAX_SAFE_INTEGER};}).sort(function(a,b){return a.k-b.k||a.i-b.i;}).map(function(x){return x.u;});}
 function sliceText(s,size,overlap){if(s.length<=size)return [s];var out=[],i=0;while(i<s.length){out.push(s.slice(i,i+size));i+=size-overlap;}return out;}
-/* 按单元边界+字数把长文档切为若干块（每块≤5单元/≤8000字，上限6块），无结构则按字数硬切 */
+/* 按科目边界+字数把长文档切为若干块（每块≤5科目/≤8000字，上限6块），无结构则按字数硬切 */
 function packChunks(text){
-  var d=detectUnitSegments(text);var CH=8000;
+  var d=detectSubjectSegments(text);var CH=8000;
   if(d&&d.segs.length){
     var chunks=[],buf=[],units=0,chars=0;
     var flush=function(){if(buf.length){chunks.push(buf.join('\n\n'));buf=[];units=0;chars=0;}};
     for(var i=0;i<d.segs.length;i++){
       var seg=d.segs[i];
-      var head='=== 单元：'+seg.title+' ===\n';
+      var head='=== 科目：'+seg.title+' ===\n';
       var budget=Math.max(CH-head.length,800);
       var pieces=seg.body.length>budget?sliceText(seg.body,budget,300):[seg.body];
       for(var p=0;p<pieces.length;p++){
@@ -2647,12 +2647,12 @@ function aiClassifyChunk(textChunk,fileName,extra){
     textChunk+(extra?('\n\n补充背景：'+extra):''),
     '',
     '严格按照如下 JSON 输出（不要任何多余文字或代码块标记）：',
-    '{"textbookName":"教材名","subject":"科目或空串","units":[{"name":"单元名（原样保留 === 单元：XXX === 标记里的完整名称）","points":[{"title":"知识点标题","content":"该知识点核心内容，忠于原文，100-250字，可背诵"}]}],"questions":[{"subject":"科目","point":"知识点标题","type":"choice|blank","q":"题干","options":["A","B","C","D"],"answer":"答案","explain":"解析"}]}',
+    '{"textbookName":"教材名","subject":"科目或空串","subjects":[{"name":"科目名（原样保留 === 科目：XXX === 标记里的完整名称）","points":[{"title":"知识点标题","content":"该知识点核心内容，忠于原文，100-250字，可背诵"}]}],"questions":[{"subject":"科目","point":"知识点标题","type":"choice|blank","q":"题干","options":["A","B","C","D"],"answer":"答案","explain":"解析"}]}',
     '',
     '要求：',
-    '1. 文本里出现的「=== 单元：XXX ===」是单元边界标记，必须严格按它分组，每个单元的知识点只能来自该标记之后文本，严禁跨单元混放；',
-    '2. 标记后无内容时该单元 points 为空数组，但单元必须保留；',
-    '3. 知识点拆细：一个概念/公式/句型/课文要点各算一条，每个单元 3-8 条；',
+    '1. 文本里出现的「=== 科目：XXX ===」是科目边界标记，必须严格按它分组，每个科目的知识点只能来自该标记之后文本，严禁跨科目混放；',
+    '2. 标记后无内容时该科目 points 为空数组，但科目必须保留；',
+    '3. 知识点拆细：一个概念/公式/句型/课文要点各算一条，每个科目 3-8 条；',
     '4. content 写原文要点，禁止写「原文页码/目录」等元描述；',
     '5. 提取 3-10 条知识点，和尽可能多的选择题（4选项）与少量填空题；',
     '6. subject 用最贴切一级科目名，不要虚构原文没有的内容；',
@@ -2662,7 +2662,7 @@ function aiClassifyChunk(textChunk,fileName,extra){
   return aiFetch(body).then(function(r){
     if(!r.ok){var msg='HTTP '+(r.status||'');var j=r.json;msg=(j.error&&(j.error.message||j.error))||msg;throw new Error(msg);}
     var content=extractAIContent(r.json)||'';
-    var clean=content.trim().replace(/^```(?:json)?\s*/i,'').replace(/```$/,'') .trim();
+    var clean=content.trim().replace(/^```(?:json)?\s*/i,'').replace(/```$/,'').trim();
     var m=clean.match(/\{[\s\S]*\}/);
     if(m){try{return JSON.parse(m[0]);}catch(e){}}
     return null;
@@ -2671,11 +2671,11 @@ function aiClassifyChunk(textChunk,fileName,extra){
 function mergeClassification(base,next){
   if(!base.textbookName&&next.textbookName)base.textbookName=next.textbookName;
   if(!base.subject&&next.subject)base.subject=next.subject;
-  (next.units||[]).forEach(function(u){
+  (next.subjects||[]).forEach(function(u){
     if(!u||!u.name)return;
-    var key=unitKey(u.name);
-    var cur=base.units.filter(function(x){return unitKey(x.name)===key;})[0];
-    if(!cur){cur={name:u.name,points:[]};base.units.push(cur);}
+    var key=subjectKey(u.name);
+    var cur=base.subjects.filter(function(x){return subjectKey(x.name)===key;})[0];
+    if(!cur){cur={name:u.name,points:[]};base.subjects.push(cur);}
     (u.points||[]).forEach(function(p){if(p&&p.title&&!cur.points.some(function(x){return x.title===p.title;}))cur.points.push({title:p.title,content:p.content||''});});
   });
   (next.questions||[]).forEach(function(q){base.questions.push(q);});
