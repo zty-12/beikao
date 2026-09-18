@@ -1582,59 +1582,77 @@ async function extractPdfText(file,ocrBox,ocrText){
  const buf=await file.arrayBuffer();
  const pdf=await window.pdfjsLib.getDocument({data:buf}).promise;
  let txt='';
- const pageTexts=[];
- for(let i=1;i<=pdf.numPages;i++){try{const pg=await pdf.getPage(i);const tc=await pg.getTextContent();pageTexts.push(tc.items.map(it=>it.str).join(' ')+'\n');}catch(e){pageTexts.push('');}}
+ const pageTexts=new Array(pdf.numPages).fill('');
+ /* 文本层并发提取：原为逐页 await，几百页教材纯等待可达十几秒；6 路并发按页号回填 */
+ await runPool(Array.from({length:pdf.numPages},function(_,i){return i+1;}),6,async function(pn){
+  try{const pg=await pdf.getPage(pn);const tc=await pg.getTextContent();pageTexts[pn-1]=tc.items.map(function(it){return it.str;}).join(' ')+'\n';}
+  catch(e){pageTexts[pn-1]='';}
+ });
  txt=pageTexts.join('');
- /* 判断文本层质量：字符过于稀薄/每页字数过少时判定为图片型 PDF，改用 OCR */
- const dense=pageTexts.map(s=>s.replace(/\s/g,'').length);
- const totalChars=dense.reduce((a,b)=>a+b,0);
+ /* 判断文本层质量：字符过于稀薄/每页字数过少时判定为图片型 PDF，改用 OCR/视觉 */
+ const dense=pageTexts.map(function(x){return (x||'').replace(/\s/g,'').length;});
+ const totalChars=dense.reduce(function(a,b){return a+b;},0);
  const imgLike=(totalChars===0)||(pdf.numPages>0&&totalChars/pdf.numPages<30);
  if(imgLike){
-  const okT=await ensureTesseract();if(!okT)throw new Error('图片型 PDF 需 OCR，但 OCR 引擎加载失败，请检查网络');
   const box=ocrBox||$('#ocrBox'),tx=ocrText||$('#ocrText');box.style.display='block';
   let ocrTxt='';
   const maxPages=Math.min(pdf.numPages,1000);
-  /* 渲染倍率 2 → 1.5：像素量减少约 44%，中文识别精度几乎无损（想更准可改回 2） */
+  /* 渲染倍率 2 → 1.5：像素量减少约 44%，中文识别精度几乎无损 */
   const SCALE=1.5;
-  /* 并发 worker 数：1 / 3 / 5（设置里可调），默认 3 */
+  /* 并发路数：1 / 3 / 5（设置里可调），默认 3 */
   const WN=Math.min([1,3,5].indexOf(Number(S.cloud.ocrWorkers))>=0?Number(S.cloud.ocrWorkers):3,maxPages);
+  const useVision=visionConfigured();
   try{
-   /* 常驻 worker 池：只初始化一次，避免每页重建（提速最大的一步） */
-   tx.textContent='正在启动 OCR 引擎 '+WN+' 个（首次需下载中文模型约10MB）…';
-   const workers=[];
-   for(let w=0;w<WN;w++)workers.push(await window.Tesseract.createWorker('chi_sim',1,{logger:function(m){}}));
    const results=new Array(maxPages).fill('');
-   let cursor=0,done=0;
-   await Promise.all(workers.map(async function(worker){
-    for(;;){
-     const idx=cursor++;if(idx>=maxPages)break;
-     try{
-      const page=await pdf.getPage(idx+1);
-      const viewport=page.getViewport({scale:SCALE});
-      const canvas=document.createElement('canvas');
-      canvas.width=Math.floor(viewport.width);canvas.height=Math.floor(viewport.height);
-      try{await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;}catch(e){canvas.width=canvas.height=0;done++;continue;}
-      let pageText='';
-      if(visionConfigured()){
-        try{
+   let cursor=0,done=0,blankSkipped=0;
+   const paint=function(){
+    tx.textContent=(useVision?'视觉模型识别':'OCR 识别')+' '+done+'/'+maxPages+' 页…'+(blankSkipped?('（已跳过空白页 '+blankSkipped+' 张）'):'');
+   };
+   /* 常驻 worker 池（并发）+ OCR worker 惰性创建（视觉顺利时不下载 10MB 中文模型） */
+   tx.textContent=useVision?('视觉模型识别中（'+WN+' 路并发，空白页自动跳过）…'):('正在启动 OCR 引擎 '+WN+' 个（首次需下载中文模型约10MB）…');
+   await Promise.all(Array.from({length:WN},function(){return (async function(){
+    let myWorker=null;
+    const needWorker=async function(){
+     if(myWorker)return myWorker;
+     const okT=await ensureTesseract();if(!okT)throw new Error('OCR 引擎加载失败，请检查网络');
+     tx.textContent='首次使用 OCR，正在下载中文模型（约 10MB）…';
+     myWorker=await window.Tesseract.createWorker('chi_sim',1,{logger:function(){}});
+     return myWorker;
+    };
+    try{
+     for(;;){
+      const idx=cursor++;if(idx>=maxPages)break;
+      try{
+       const page=await pdf.getPage(idx+1);
+       const viewport=page.getViewport({scale:SCALE});
+       const canvas=document.createElement('canvas');
+       canvas.width=Math.floor(viewport.width);canvas.height=Math.floor(viewport.height);
+       try{await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;}catch(e){canvas.width=canvas.height=0;done++;continue;}
+       let pageText='';
+       /* 空白/纯插图页直接跳过：封面、扉页、空白练习页很常见，跳过能省下可观的 API 时间 */
+       if(isBlankCanvas(canvas)){blankSkipped++;}
+       else{
+        if(useVision){
+         try{
           const du=canvas.toDataURL('image/jpeg',0.85);
           const vt=(await visionRecognizeImage(du)).replace(/^\[空白页\]\s*$/u,'').trim();
-          if(vt && assessTextQuality(vt).score>=0.4) pageText=vt;
-        }catch(e){ /* 视觉失败，回退 OCR */ }
-      }
-      if(!pageText){
-        /* 直接传 canvas；blocks 模式 + 行级过滤去插图噪声 */
-        const res=await worker.recognize(canvas,{},{blocks:true,text:true});
-        pageText=pickOcrText(res&&res.data&&res.data.blocks,(res&&res.data&&res.data.text)||'');
-      }
-      results[idx]=pageText;
-      canvas.width=canvas.height=0;   /* 及时释放，避免多页 canvas 堆积占内存 */
-     }catch(e){results[idx]='';}
-     done++;
-     tx.textContent=(visionConfigured()?'视觉模型识别':'OCR 识别')+' '+done+'/'+maxPages+' 页…';
-    }
-   }));
-   for(let w=0;w<workers.length;w++){try{await workers[w].terminate();}catch(e){}}
+          if(vt&&assessTextQuality(vt).score>=0.4)pageText=vt;
+         }catch(e){ /* 视觉失败，回退 OCR */ }
+        }
+        if(!pageText){
+         /* 直接传 canvas；blocks 模式 + 行级过滤去插图噪声 */
+         const worker=await needWorker();
+         const res=await worker.recognize(canvas,{},{blocks:true,text:true});
+         pageText=pickOcrText(res&&res.data&&res.data.blocks,(res&&res.data&&res.data.text)||'');
+        }
+       }
+       results[idx]=pageText;
+       canvas.width=canvas.height=0;   /* 及时释放，避免多页 canvas 堆积占内存 */
+      }catch(e){results[idx]='';}
+      done++;paint();
+     }
+    }finally{ if(myWorker){try{await myWorker.terminate();}catch(e){}} }
+   })();}));
    ocrTxt=results.join('\n');
   }catch(e){/* OCR 中断则用已有部分 */}
   box.style.display='none';
@@ -1671,13 +1689,85 @@ async function extractFromImage(file){
    throw new Error('未从图片中识别出可读文字，请换更清晰的图片');
  }catch(e){if(box)box.style.display='none';throw new Error('图片识别失败：'+((e&&e.message)||'').slice(0,40));}
 }
+/* ===== 提速工具（参考教务工作台 pagePool / llm.chat 的设计） ===== */
+/* 受限并发：concurrency 个「工人」从同一队列取任务；任务自身抛错不影响其它任务（best-effort） */
+function runPool(items,concurrency,task){
+ var list=items||[];
+ if(!list.length)return Promise.resolve();
+ var size=Math.max(1,Math.min(Math.floor(concurrency)||1,list.length));
+ var cursor=0;
+ var run=function(){
+  var i=cursor++;
+  if(i>=list.length)return Promise.resolve();
+  return Promise.resolve().then(function(){return task(list[i],i);}).then(null,function(){}).then(run);
+ };
+ return Promise.all(Array.from({length:size},run)).then(function(){});
+}
+/* 估算 canvas 的「墨迹占比」（非白像素/总像素）：封面、扉页、空白练习页可据此直接跳过，省一次 API 调用 */
+function inkRatioOfCanvas(canvas){
+ try{
+  var W=48;var H=Math.max(1,Math.round(W*canvas.height/Math.max(1,canvas.width)));
+  var small=document.createElement('canvas');small.width=W;small.height=H;
+  var ctx=small.getContext('2d');if(!ctx)return 1;
+  ctx.fillStyle='#ffffff';ctx.fillRect(0,0,W,H);ctx.drawImage(canvas,0,0,W,H);
+  var d=ctx.getImageData(0,0,W,H).data;var ink=0;var n=W*H;
+  for(var i=0;i<n;i++){if(0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2]<190)ink++;}
+  return ink/n;
+ }catch(e){return 1;}
+}
+function isBlankCanvas(canvas){return inkRatioOfCanvas(canvas)<0.004;}
+/* 带超时的 fetch：请求挂死时不再无限等待（文本 90s / 视觉 120s） */
+function fetchWithTimeoutP(url,opt,ms){
+ var o=Object.assign({},opt);var ctl=null,t=null;
+ if(typeof AbortController!=='undefined'&&ms>0){ctl=new AbortController();o.signal=ctl.signal;t=setTimeout(function(){try{ctl.abort();}catch(e){}},ms);}
+ var clear=function(){if(t)clearTimeout(t);};
+ return fetch(url,o).then(function(r){clear();return r;},function(e){clear();throw e;});
+}
+/* 上游不支持 response_format 时记住它，后续调用直接跳过 json 模式（避免每次白跑一次 400 往返） */
+var LLM_RETRY_DELAYS=[2000,5000,12000];
+var LLM_NOJSON_KEY='bk-llm-nojson';
+function llmNoJsonKey(){var c=aiCfg();return (c.url||'')+'|'+(c.model||'');}
+function llmJsonUnsupported(){
+ try{var arr=JSON.parse(localStorage.getItem(LLM_NOJSON_KEY)||'[]');return Array.isArray(arr)&&arr.indexOf(llmNoJsonKey())>-1;}
+ catch(e){return false;}
+}
+function llmMarkNoJson(){
+ try{
+  var k=llmNoJsonKey();var arr=[];
+  try{arr=JSON.parse(localStorage.getItem(LLM_NOJSON_KEY)||'[]');}catch(e){arr=[];}
+  if(!Array.isArray(arr))arr=[];
+  if(arr.indexOf(k)<0){arr.push(k);localStorage.setItem(LLM_NOJSON_KEY,JSON.stringify(arr));}
+ }catch(e){}
+}
+/* 底部轻量忙碌提示（AI 提炼/摘要期间可见，避免长时间无反馈） */
+function setAiBusy(msg){
+ var el=$('#aiBusy');
+ if(msg===null||msg===undefined){if(el)el.parentNode.removeChild(el);return;}
+ if(!el){
+  el=document.createElement('div');el.id='aiBusy';
+  el.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom) + 78px);z-index:9999;background:rgba(47,93,76,.95);color:#fff;padding:9px 16px;border-radius:999px;font-size:13px;font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,.2);max-width:92vw;text-align:center';
+  document.body.appendChild(el);
+ }
+ el.textContent=msg;
+}
+
 /* ================= AI 自动提炼知识点（OpenAI 兼容接口） ================= */
 function aiCfg(){return{url:(S.cloud.aiUrl||'').replace(/\/+$/, ''), key:S.cloud.aiKey||'', model:S.cloud.aiModel||''};}
 function aiConfigured(){const c=aiCfg();return !!(c.url&&c.key&&c.model);}
 /* 统一发起 AI 请求：支持 direct（OpenAI 兼容）和 edge（Supabase Edge Function 中转）两种模式 */
+/* 单次请求（支持 maxTokens 输出上限 + 超时；网络异常统一转成 status=0 便于重试判断） */
 function aiFetchWithCfg(body, cfg){
  const mode=(cfg.proxyMode||'direct');
  if(!cfg.url||!cfg.key||!cfg.model)throw new Error('AI 地址 / Key / 模型未填写');
+ const mt=Math.floor(body.maxTokens||0);
+ const isVision=Array.isArray(body.messages)&&body.messages.some(function(m){return m&&Array.isArray(m.content);});
+ const timeoutMs=Math.floor(body.timeoutMs||0)||(isVision?120000:90000);
+ const wrapOk=function(r){return r.json().catch(function(){return {};}).then(function(j){return {ok:r.ok,status:r.status,json:j};});};
+ const wrapErr=function(e){
+  const aborted=(e&&e.name==='AbortError');
+  const m=aborted?('请求超时（'+(timeoutMs/1000)+'s）'):('连接失败：'+((e&&e.message)||''));
+  return {ok:false,status:0,json:{error:{message:m}}};
+ };
  if(mode==='edge'){
   const url=(cfg.edgeUrl||'').trim();
   if(!url)throw new Error('未填写 Edge Function URL');
@@ -1685,16 +1775,37 @@ function aiFetchWithCfg(body, cfg){
   if(!sbKey)throw new Error('未填写 Supabase anon key（Edge Function 网关校验需要）');
   const headers={'Content-Type':'application/json','Authorization':'Bearer '+sbKey,'apikey':sbKey,'x-proxy-token':cfg.proxyToken||''};
   const payload={baseUrl:cfg.url,apiKey:cfg.key,model:cfg.model,messages:body.messages,temperature:typeof body.temperature==='number'?body.temperature:0.7,jsonMode:!!body.jsonMode};
-  return fetch(url,{method:'POST',headers,body:JSON.stringify(payload)}).then(async r=>({ok:r.ok,status:r.status,json:await r.json().catch(()=>({}))}));
+  if(mt>0)payload.maxTokens=mt;
+  return fetchWithTimeoutP(url,{method:'POST',headers:headers,body:JSON.stringify(payload)},timeoutMs).then(wrapOk,wrapErr);
  }
  // direct：原生 OpenAI 兼容格式
  const ep=cfg.url+'/chat/completions';
  const headers={'Content-Type':'application/json','Authorization':'Bearer '+cfg.key};
  const payload={model:cfg.model,messages:body.messages,temperature:body.temperature};
+ if(mt>0)payload.max_tokens=mt;
  if(body.jsonMode)payload.response_format={type:'json_object'};
- return fetch(ep,{method:'POST',headers,body:JSON.stringify(payload)}).then(async r=>({ok:r.ok,status:r.status,json:await r.json().catch(()=>({}))}));
+ return fetchWithTimeoutP(ep,{method:'POST',headers:headers,body:JSON.stringify(payload)},timeoutMs).then(wrapOk,wrapErr);
 }
-function aiFetch(body){return aiFetchWithCfg(body, Object.assign({proxyMode:S.cloud.aiProxyMode,edgeUrl:S.cloud.edgeFunctionUrl,proxyToken:S.cloud.proxyToken}, aiCfg()));}
+/* 统一请求：jsonMode 被 400 拒则降级并记住；429/408/5xx/超时/断网自动退避重试（参考教务 chat()） */
+function aiFetchRetry(body,cfg){
+ const merged=Object.assign({},body);
+ let useJson=!!body.jsonMode&&!llmJsonUnsupported();
+ let retries=0,last=null;
+ const loop=function(){
+  merged.jsonMode=useJson;
+  return aiFetchWithCfg(merged,cfg).then(function(r){
+   if(r.ok)return r;
+   last=r;
+   if(useJson&&r.status===400){llmMarkNoJson();useJson=false;return loop();}
+   const retriable=(r.status===0||r.status===408||r.status===429||r.status>=500);
+   if(!retriable||retries>=LLM_RETRY_DELAYS.length)return r;
+   const wait=LLM_RETRY_DELAYS[retries];retries++;
+   return new Promise(function(res){setTimeout(res,wait);}).then(loop);
+  });
+ };
+ return loop();
+}
+function aiFetch(body){return aiFetchRetry(body, Object.assign({proxyMode:S.cloud.aiProxyMode,edgeUrl:S.cloud.edgeFunctionUrl,proxyToken:S.cloud.proxyToken}, aiCfg()));}
 function extractAIContent(j){
  if(!j)return '';
  if(typeof j.content==='string')return j.content;
@@ -1725,21 +1836,25 @@ function visionConfigured(){
 function fileToDataUrl(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsDataURL(file);});}
 function makeTestImage(){const c=document.createElement('canvas');c.width=200;c.height=80;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,200,80);x.fillStyle='#000';x.font='28px sans-serif';x.fillText('测试 123',20,50);return c.toDataURL('image/jpeg',0.9);}
 /* 把一张图（dataURL）发给多模态模型，原样读出文字；失败抛错 */
+/* 把一张图（dataURL）发给多模态模型，原样读出文字；失败抛错。
+   输出上限 3000（与教务一致）：OCR 要完整读出整页，但挡住模型额外的解释性输出。 */
 async function visionRecognizeImage(dataUrl){
  const c=visionCfg();
  if(!c.url||!c.key||!c.model)throw new Error('视觉模型地址 / Key / 模型未填写');
  const body={model:c.model,messages:[{role:'user',content:[
    {type:'text',text:'你是一名中文/英文教材识别助手。原样读出这页教材/讲义/笔记上所有可见文字，保留排版顺序与段落结构，用 Markdown 风格输出；保留「第N章/Unit N/题号/选项/填空横线」；整页为插图/封面/留白时只输出[空白页]；不要任何解释。'},
    {type:'image_url',image_url:{url:dataUrl,detail:'high'}}
- ]}],temperature:0.2};
- const r=await aiFetchWithCfg(body, c);
+ ]}],temperature:0.2,maxTokens:3000};
+ const r=await aiFetchRetry(body, c);
  if(!r.ok){let msg='HTTP '+(r.status||'');const j=r.json;msg=(j.error&&(j.error.message||j.error))||msg;throw new Error(msg);}
  const j=r.json;
  let content=extractAIContent(j)||'';
  return String(content||'').trim();
 }
 /* 调用 AI，返回 {ok, data|text, msg}。testOnly=true 时只做连通性测试。 */
-async function aiExtractKnowledge(text,extra='',testOnly=false){
+/* 调用 AI，返回 {ok, data|text, msg}。testOnly=true 时只做连通性测试。
+   onProgress({done,total,failed,retrying}) 可选，用于显示分段进度。 */
+async function aiExtractKnowledge(text,extra='',testOnly=false,onProgress=null){
  const c=aiCfg();
  if(testOnly&&(!c.url||!c.key||!c.model))return{ok:false,msg:'请先在设置填写 AI 地址 / Key / 模型'};
  if(testOnly){
@@ -1748,27 +1863,45 @@ async function aiExtractKnowledge(text,extra='',testOnly=false){
    return{ok:true,text:extractAIContent(r.json)||''};}
   catch(e){return{ok:false,msg:'网络错误：'+(e.message||'')};}
  }
- /* 长文档分块 + 逐块归类 + 合并 + 429 重试（参考教务 classifyImportedDocument） */
+ /* 长文档分块 + 逐块归类 + 跨块合并（参考教务工作台 classifyImportedDocument） */
  const chunks=packChunks(text);
  const agg={textbookName:'',subject:'',subjects:[],questions:[]};
- let failures=0,lastErr=null;
- for(let i=0;i<chunks.length;i++){
-  let done=false,attempt=0;
-  while(!done&&attempt<3){
-   attempt++;
+ const failedIdx=[];let failures=0,lastErr=null;
+ const tick=function(p){if(onProgress){try{onProgress(p);}catch(e){}}};
+ setAiBusy('AI 提炼中：共 '+chunks.length+' 段，请勿关闭页面…');
+ try{
+  for(let i=0;i<chunks.length;i++){
+   tick({done:i,total:chunks.length,failed:failedIdx.length});
+   setAiBusy('AI 提炼中 '+(i+1)+'/'+chunks.length+' 段…');
+   const t0=Date.now();
    try{
     const part=await aiClassifyChunk(chunks[i],'导入资料',extra);
     if(part){ if(part.textbookName)agg.textbookName=part.textbookName; if(part.subject)agg.subject=part.subject; mergeClassification(agg,{subjects:part.subjects||[],questions:part.questions||[]}); }
-    failures=0;done=true;
+    failures=0;
    }catch(e){
-    lastErr=e;
-    const retry=/429|rate|limit|too many/i.test(e.message||'')||e.status===429;
-    if(retry&&attempt<3){ await new Promise(r=>setTimeout(r,attempt*2500+1500)); failures++; continue; }
-    done=true;
+    /* 单块失败（限流/输出不可解析）不再让整次导入全挂：跳过继续，结尾补试一轮 */
+    failures++;lastErr=e;failedIdx.push(i);
+    if(failures>=3&&(agg.subjects.length||agg.questions.length))break;
+   }
+   if(i<chunks.length-1){
+    /* 自适应块间等待（参考教务 v31.5）：上一块本身就慢说明上游在排队，再等满纯属白等 */
+    const cost=Date.now()-t0;
+    const wait=failures>0?6000:(cost<3000?3000:cost<8000?1200:500);
+    await new Promise(function(r){setTimeout(r,wait);});
    }
   }
-  if(i<chunks.length-1)await new Promise(r=>setTimeout(r,failures>0?4000:2000));
- }
+  /* 补试轮：首轮失败的块（最多 6 块）隔久一点再试一次，挽救尾部段落缺失 */
+  const retryIdx=failedIdx.slice(0,6);
+  for(let j=0;j<retryIdx.length;j++){
+   tick({done:chunks.length,total:chunks.length,failed:failedIdx.length-j,retrying:true});
+   setAiBusy('补试未完成段落 '+(j+1)+'/'+retryIdx.length+'…');
+   await new Promise(function(r){setTimeout(r,8000);});
+   try{
+    const part=await aiClassifyChunk(chunks[retryIdx[j]],'导入资料',extra);
+    if(part){ if(part.textbookName)agg.textbookName=part.textbookName; if(part.subject)agg.subject=part.subject; mergeClassification(agg,{subjects:part.subjects||[],questions:part.questions||[]}); }
+   }catch(e){lastErr=e;}
+  }
+ }finally{ setAiBusy(null); }
  agg.subjects=sortSubjects(agg.subjects);
  const subj=agg.subject||'综合';
  const knowledge=[];
@@ -2111,13 +2244,13 @@ $('#aiExtractBtn').onclick=async()=>{
 请先在「刷题中心」点「📄 导入资料」，导入 PDF / TXT / Word 教材或讲义后，再回来点「AI 提炼」。</div><div class="m-actions"><button class="btn primary" style="flex:1" id="aiOk1">知道了</button></div>`);const o=$('#aiOk1');if(o)o.onclick=closeModal;return;}
  closeModal();
  openModal(`<div class="m-title">🤖 AI 提炼知识点</div>
-  <p class="hint">将把 ${lastImportedText.length} 字教材内容发给模型（${esc(S.cloud.aiModel)}）抽取知识点与题目，预计 10-30 秒。</p>
+  <p class="hint">将把 ${lastImportedText.length} 字教材内容发给模型（${esc(S.cloud.aiModel)}）抽取知识点与题目（分段提炼，底部显示进度，长教材约 1-3 分钟）。</p>
   <div class="ai-loading" id="aiProgress" style="padding:20px 0;text-align:center;color:var(--green-mid);font-weight:700">⏳ 正在提炼…</div>
   <div class="m-actions"><button class="btn primary" id="aiGo">开始提炼</button><button class="btn ghost" id="aiCancelGo">取消</button></div>`);
  $('#aiCancelGo').onclick=closeModal;
  $('#aiGo').onclick=async()=>{
   const pr=$('#aiProgress');if(pr)pr.textContent='⏳ 已发送请求，等待模型返回…';
-  const r=await aiExtractKnowledge(lastImportedText);
+  const r=await aiExtractKnowledge(lastImportedText,'',false,function(p){if(!pr)return;if(p.retrying){pr.textContent='⏳ 正在补试未完成的段落…';return;}pr.textContent='⏳ 提炼进度 '+(p.done+1)+'/'+p.total+' 段…';});
   if(!r.ok){closeModal();toast('❌ '+r.msg);setTimeout(()=>{openModal(`<div class="m-title">🤖 提炼失败</div><div class="soft-box" style="white-space:pre-line">${esc(r.msg||'未知错误')}</div><div class="m-actions"><button class="btn primary" style="flex:1" id="aiFailOk">知道了</button></div>`);const o=$('#aiFailOk');if(o)o.onclick=closeModal;},50);return;}
   closeModal();
   showAiPreview(r.data,false);
@@ -2183,12 +2316,10 @@ function showAiPreview(data,note){
   var doSum=($('#aiSumChk')?$('#aiSumChk').checked:false);
   if(doSum&&built.length){
    toast('正在为 '+built.length+' 条知识点生成 AI 摘要…');
-   (function loop(idx){
-    if(idx>=built.length){toast('✅ 已为 '+built.length+' 条知识点生成摘要');return;}
-    var item=built[idx];
-    aiSummarizePoint(item.point,item.content).then(function(s){if(s){item.summary=s;save();}loop(idx+1);}).catch(function(){loop(idx+1);});
-   })(0);
-  }
+   var sumDone=0;setAiBusy('生成摘要 0/'+built.length+'…');
+   runPool(built,2,function(item){
+    return aiSummarizePoint(item.point,item.content).then(function(s){if(s){item.summary=s;save();}sumDone++;setAiBusy('生成摘要 '+sumDone+'/'+built.length+'…');}).catch(function(){});
+   }).then(function(){setAiBusy(null);toast('✅ 已为 '+sumDone+' 条知识点生成摘要');});  }
  };
 }
 
@@ -2658,7 +2789,7 @@ function aiClassifyChunk(textChunk,fileName,extra){
     '6. subject 用最贴切一级科目名，不要虚构原文没有的内容；',
     '7. JSON 必须合法，字符串内不得含未转义引号或换行。'
   ];
-  var body={model:c.model,messages:[{role:'system',content:'你是资深教研老师，负责把教材/讲义导入知识库，输出结构化 JSON。'},{role:'user',content:lines.join('\n')}],temperature:0.3,jsonMode:true};
+  var body={model:c.model,messages:[{role:'system',content:'你是资深教研老师，负责把教材/讲义导入知识库，输出结构化 JSON。'},{role:'user',content:lines.join('\n')}],temperature:0.3,jsonMode:true,maxTokens:4000};
   return aiFetch(body).then(function(r){
     if(!r.ok){var msg='HTTP '+(r.status||'');var j=r.json;msg=(j.error&&(j.error.message||j.error))||msg;throw new Error(msg);}
     var content=extractAIContent(r.json)||'';
@@ -2685,7 +2816,7 @@ function aiSummarizePoint(title,content){
   var body={model:c.model,messages:[
     {role:'system',content:'你是教研老师。把下面这个知识点整理成一段结构化摘要（一句话定位 + 3-5 条要点 + 常见易错点），直接输出 Markdown 文本，不要 JSON 或说明。'},
     {role:'user',content:'知识点标题：'+title+'\n原始要点：\n'+(content||'').slice(0,2000)+'\n\n请整理为可复用摘要。'}
-  ],temperature:0.4};
+  ],temperature:0.4,maxTokens:400};
   return aiFetch(body).then(function(r){if(!r.ok)return '';return (extractAIContent(r.json)||'').trim();});
 }
 
