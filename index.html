@@ -589,6 +589,8 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
         <div class="btn-row">
           <button class="btn sm primary" id="matImportBtn">📄 导入文件资料</button>
           <input type="file" id="matImportFile" accept=".pdf,.txt,.doc,.docx,.png,.jpg,.jpeg,.webp,.bmp,.gif" style="display:none">
+          <button class="btn sm" id="matPackBtn">📦 知识点包</button>
+          <input type="file" id="matPackFile" accept=".json,.txt" style="display:none">
           <button class="btn sm" id="videoImportBtn">🎬 导入视频资料</button>
           <input type="file" id="videoFile" accept="video/*" multiple style="display:none">
         </div>
@@ -2515,6 +2517,33 @@ function renderVideoTree(){
  });
 }
 function checkVideoTaskDone(){let changed=false;S.kb.videos.forEach(v=>{if(v.progress>=100&&v.point){allTasks().forEach(t=>{if(t.subject===v.subject&&t.name&&t.name.indexOf(v.point)>-1&&!t.done){t.done=true;changed=true;}});}});if(changed){save();renderTasks();renderProgress();renderStats();toast('✅ 该知识点视频已全部看完，对应学习任务自动完成');}}
+/* ---------- 知识点包导入：JSON 直接并入资料区，不走 AI ---------- */
+$('#matPackBtn').onclick=()=>$('#matPackFile').click();
+$('#matPackFile').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
+ rd.onload=function(){try{
+   const j=JSON.parse(String(rd.result||''));
+   const arr=Array.isArray(j)?j:(j.knowledge||j.items||j.data||[]);
+   const norm=[];
+   arr.forEach(function(it){if(!it)return;
+     if(it.points&&Array.isArray(it.points)){
+       const subj=String(it.name||it.subject||'').trim();
+       it.points.forEach(function(p){norm.push({subject:subj,point:String(p.title||p.name||p.point||'').trim(),content:String(p.content||'').trim(),summary:String(p.summary||'')});});
+     }else{
+       norm.push({subject:String(it.subject||'').trim(),point:String(it.point||it.title||'').trim(),content:String(it.content||'').trim(),summary:String(it.summary||'')});
+     }});
+   let add=0,skip=0;
+   norm.forEach(function(k){
+     if(!k.subject&&!k.point)return;
+     if(!k.subject)k.subject='未分类';
+     if(!k.point)k.point='未命名';
+     if(S.kb.knowledge.find(x=>x.subject===k.subject&&x.point===k.point)){skip++;return;}
+     S.kb.knowledge.push({id:u(),subject:k.subject,point:k.point,content:k.content,summary:k.summary||''});
+     add++;
+   });
+   save();renderKBAll();
+   toast('✅ 知识点包：新增 '+add+' 条'+(skip?('，跳过重复 '+skip+' 条'):''));
+ }catch(err){toast('⚠️ 知识点包解析失败：'+String(err.message||'').slice(0,40));}};
+ rd.readAsText(f);e.target.value='';};
 $('#matImportBtn').onclick=()=>$('#matImportFile').click();
 $('#matImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;
  if(!aiConfigured()){
