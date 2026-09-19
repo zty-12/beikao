@@ -2518,54 +2518,59 @@ function renderVideoTree(){
 }
 function checkVideoTaskDone(){let changed=false;S.kb.videos.forEach(v=>{if(v.progress>=100&&v.point){allTasks().forEach(t=>{if(t.subject===v.subject&&t.name&&t.name.indexOf(v.point)>-1&&!t.done){t.done=true;changed=true;}});}});if(changed){save();renderTasks();renderProgress();renderStats();toast('✅ 该知识点视频已全部看完，对应学习任务自动完成');}}
 /* ---------- 数据包导入：JSON 直接并入资料区 / 题库，不走 AI ---------- */
+function importDataPack(f){
+  const rd=new FileReader();
+  rd.onload=function(){try{
+    const j=JSON.parse(String(rd.result||''));
+    const isArr=Array.isArray(j);
+    const karr=isArr?j:((j.knowledge||j.items)||[]);
+    const qarr=isArr?[]:((j.questions||j.qs)||[]);
+    const norm=[];
+    (karr||[]).forEach(function(it){if(!it)return;
+      if(it.points&&Array.isArray(it.points)){
+        const subj=String(it.name||it.subject||'').trim();
+        it.points.forEach(function(p){norm.push({subject:subj,point:String(p.title||p.name||p.point||'').trim(),content:String(p.content||'').trim(),summary:String(p.summary||'')});});
+      }else{
+        norm.push({subject:String(it.subject||'').trim(),point:String(it.point||it.title||'').trim(),content:String(it.content||'').trim(),summary:String(it.summary||'')});
+      }});
+    let add=0,skip=0;
+    norm.forEach(function(k){
+      if(!k.subject&&!k.point)return;
+      if(!k.subject)k.subject='未分类';
+      if(!k.point)k.point='未命名';
+      if(S.kb.knowledge.find(x=>x.subject===k.subject&&x.point===k.point)){skip++;return;}
+      S.kb.knowledge.push({id:u(),subject:k.subject,point:k.point,content:k.content,summary:k.summary||''});
+      add++;
+    });
+    let qadd=0,qskip=0;
+    (qarr||[]).forEach(function(q){
+      if(!q)return;
+      const qt=String(q.q||q.question||'').trim();
+      if(!qt)return;
+      if(S.kb.questions.find(x=>String(x.q||'').trim()===qt)){qskip++;return;}
+      let opts=q.options||[];
+      if(opts&&!Array.isArray(opts)){const oo=opts;opts=['A','B','C','D'].map(function(L){return oo[L]||'';});}
+      opts=opts.map(function(o){return String(o||'').trim();}).filter(function(x){return x;});
+      S.kb.questions.unshift({id:u(),subject:String(q.subject||'未分类').trim(),point:String(q.point||'').trim(),
+        q:qt,options:opts,answer:String(q.answer||'').trim().toUpperCase(),
+        explain:String(q.explain||q.analysis||'').trim(),source:q.source||'数据包',
+        type:opts.length>=2?'choice':'blank'});
+      qadd++;
+    });
+    save();renderKBAll();
+    if(typeof renderQuizColumns==='function')renderQuizColumns();
+    const parts=[];
+    if(add||skip)parts.push('知识点 新增'+add+(skip?(' 跳过重复'+skip):''));
+    if(qadd||qskip)parts.push('题目 新增'+qadd+(qskip?(' 跳过重复'+qskip):''));
+    toast('✅ 数据包：'+(parts.join('，')||'无可导入内容'));
+  }catch(err){toast('⚠️ 数据包解析失败：'+String(err.message||'').slice(0,40));}};
+  rd.readAsText(f);
+}
 $('#matPackBtn').onclick=()=>$('#matPackFile').click();
-$('#matPackFile').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
- rd.onload=function(){try{
-   const j=JSON.parse(String(rd.result||''));
-   const isArr=Array.isArray(j);
-   const karr=isArr?j:((j.knowledge||j.items)||[]);
-   const qarr=isArr?[]:((j.questions||j.qs)||[]);
-   const norm=[];
-   (karr||[]).forEach(function(it){if(!it)return;
-     if(it.points&&Array.isArray(it.points)){
-       const subj=String(it.name||it.subject||'').trim();
-       it.points.forEach(function(p){norm.push({subject:subj,point:String(p.title||p.name||p.point||'').trim(),content:String(p.content||'').trim(),summary:String(p.summary||'')});});
-     }else{
-       norm.push({subject:String(it.subject||'').trim(),point:String(it.point||it.title||'').trim(),content:String(it.content||'').trim(),summary:String(it.summary||'')});
-     }});
-   let add=0,skip=0;
-   norm.forEach(function(k){
-     if(!k.subject&&!k.point)return;
-     if(!k.subject)k.subject='未分类';
-     if(!k.point)k.point='未命名';
-     if(S.kb.knowledge.find(x=>x.subject===k.subject&&x.point===k.point)){skip++;return;}
-     S.kb.knowledge.push({id:u(),subject:k.subject,point:k.point,content:k.content,summary:k.summary||''});
-     add++;
-   });
-   let qadd=0,qskip=0;
-   (qarr||[]).forEach(function(q){
-     if(!q)return;
-     const qt=String(q.q||q.question||'').trim();
-     if(!qt)return;
-     if(S.kb.questions.find(x=>String(x.q||'').trim()===qt)){qskip++;return;}
-     let opts=q.options||[];
-     if(opts&&!Array.isArray(opts)){const oo=opts;opts=['A','B','C','D'].map(function(L){return oo[L]||'';});}
-     opts=opts.map(function(o){return String(o||'').trim();}).filter(function(x){return x;});
-     S.kb.questions.unshift({id:u(),subject:String(q.subject||'未分类').trim(),point:String(q.point||'').trim(),
-       q:qt,options:opts,answer:String(q.answer||'').trim().toUpperCase(),
-       explain:String(q.explain||q.analysis||'').trim(),source:q.source||'数据包',
-       type:opts.length>=2?'choice':'blank'});
-     qadd++;
-   });
-   save();renderKBAll();
-   if(typeof renderQuizColumns==='function')renderQuizColumns();
-   const parts=[];
-   if(add||skip)parts.push('知识点 新增'+add+(skip?(' 跳过重复'+skip):''));
-   if(qadd||qskip)parts.push('题目 新增'+qadd+(qskip?(' 跳过重复'+qskip):''));
-   toast('✅ 数据包：'+(parts.join('，')||'无可导入内容'));
- }catch(err){toast('⚠️ 数据包解析失败：'+String(err.message||'').slice(0,40));}};
- rd.readAsText(f);e.target.value='';};$('#matImportBtn').onclick=()=>$('#matImportFile').click();
+$('#matPackFile').onchange=e=>{const f=e.target.files[0];if(!f)return;importDataPack(f);e.target.value='';};
+$('#matImportBtn').onclick=()=>$('#matImportFile').click();
 $('#matImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;
+ if(f.name.toLowerCase().endsWith('.json')){importDataPack(f);e.target.value='';return;}
  if(!aiConfigured()){
    toast('正在解析文件资料…');try{const txt=await parseImportFile(f,$('#ocrBox2'),$('#ocrText2'));lastImportedText=txt;importKnowledgeOnly(txt,f.name);}catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,45));}e.target.value='';return;
  }
