@@ -589,7 +589,7 @@ select.inp{appearance:none;background-image:linear-gradient(45deg,transparent 50
         <div class="btn-row">
           <button class="btn sm primary" id="matImportBtn">📄 导入文件资料</button>
           <input type="file" id="matImportFile" accept=".pdf,.txt,.doc,.docx,.png,.jpg,.jpeg,.webp,.bmp,.gif" style="display:none">
-          <button class="btn sm" id="matPackBtn">📦 知识点包</button>
+          <button class="btn sm" id="matPackBtn">📦 数据包导入</button>
           <input type="file" id="matPackFile" accept=".json,.txt" style="display:none">
           <button class="btn sm" id="videoImportBtn">🎬 导入视频资料</button>
           <input type="file" id="videoFile" accept="video/*" multiple style="display:none">
@@ -2517,14 +2517,16 @@ function renderVideoTree(){
  });
 }
 function checkVideoTaskDone(){let changed=false;S.kb.videos.forEach(v=>{if(v.progress>=100&&v.point){allTasks().forEach(t=>{if(t.subject===v.subject&&t.name&&t.name.indexOf(v.point)>-1&&!t.done){t.done=true;changed=true;}});}});if(changed){save();renderTasks();renderProgress();renderStats();toast('✅ 该知识点视频已全部看完，对应学习任务自动完成');}}
-/* ---------- 知识点包导入：JSON 直接并入资料区，不走 AI ---------- */
+/* ---------- 数据包导入：JSON 直接并入资料区 / 题库，不走 AI ---------- */
 $('#matPackBtn').onclick=()=>$('#matPackFile').click();
 $('#matPackFile').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=new FileReader();
  rd.onload=function(){try{
    const j=JSON.parse(String(rd.result||''));
-   const arr=Array.isArray(j)?j:(j.knowledge||j.items||j.data||[]);
+   const isArr=Array.isArray(j);
+   const karr=isArr?j:((j.knowledge||j.items)||[]);
+   const qarr=isArr?[]:((j.questions||j.qs)||[]);
    const norm=[];
-   arr.forEach(function(it){if(!it)return;
+   (karr||[]).forEach(function(it){if(!it)return;
      if(it.points&&Array.isArray(it.points)){
        const subj=String(it.name||it.subject||'').trim();
        it.points.forEach(function(p){norm.push({subject:subj,point:String(p.title||p.name||p.point||'').trim(),content:String(p.content||'').trim(),summary:String(p.summary||'')});});
@@ -2540,11 +2542,29 @@ $('#matPackFile').onchange=e=>{const f=e.target.files[0];if(!f)return;const rd=n
      S.kb.knowledge.push({id:u(),subject:k.subject,point:k.point,content:k.content,summary:k.summary||''});
      add++;
    });
+   let qadd=0,qskip=0;
+   (qarr||[]).forEach(function(q){
+     if(!q)return;
+     const qt=String(q.q||q.question||'').trim();
+     if(!qt)return;
+     if(S.kb.questions.find(x=>String(x.q||'').trim()===qt)){qskip++;return;}
+     let opts=q.options||[];
+     if(opts&&!Array.isArray(opts)){const oo=opts;opts=['A','B','C','D'].map(function(L){return oo[L]||'';});}
+     opts=opts.map(function(o){return String(o||'').trim();}).filter(function(x){return x;});
+     S.kb.questions.unshift({id:u(),subject:String(q.subject||'未分类').trim(),point:String(q.point||'').trim(),
+       q:qt,options:opts,answer:String(q.answer||'').trim().toUpperCase(),
+       explain:String(q.explain||q.analysis||'').trim(),source:q.source||'数据包',
+       type:opts.length>=2?'choice':'blank'});
+     qadd++;
+   });
    save();renderKBAll();
-   toast('✅ 知识点包：新增 '+add+' 条'+(skip?('，跳过重复 '+skip+' 条'):''));
- }catch(err){toast('⚠️ 知识点包解析失败：'+String(err.message||'').slice(0,40));}};
- rd.readAsText(f);e.target.value='';};
-$('#matImportBtn').onclick=()=>$('#matImportFile').click();
+   if(typeof renderQuizColumns==='function')renderQuizColumns();
+   const parts=[];
+   if(add||skip)parts.push('知识点 新增'+add+(skip?(' 跳过重复'+skip):''));
+   if(qadd||qskip)parts.push('题目 新增'+qadd+(qskip?(' 跳过重复'+qskip):''));
+   toast('✅ 数据包：'+(parts.join('，')||'无可导入内容'));
+ }catch(err){toast('⚠️ 数据包解析失败：'+String(err.message||'').slice(0,40));}};
+ rd.readAsText(f);e.target.value='';};$('#matImportBtn').onclick=()=>$('#matImportFile').click();
 $('#matImportFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;
  if(!aiConfigured()){
    toast('正在解析文件资料…');try{const txt=await parseImportFile(f,$('#ocrBox2'),$('#ocrText2'));lastImportedText=txt;importKnowledgeOnly(txt,f.name);}catch(err){toast('⚠️ 导入失败：'+(err.message||'').slice(0,45));}e.target.value='';return;
