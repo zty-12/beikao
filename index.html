@@ -1125,7 +1125,7 @@ function renderLogTiles(){
 }
 function renderFocusList(){
  const t=today();const list=S.log.records.filter(r=>{const d=new Date(r.ts);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')===t;}).slice().reverse();
- $('#focusList').innerHTML=list.length?list.map(r=>{const d=new Date(r.ts);return `<div class="kb-row"><span style="font-size:16px">${r.type.indexOf('🎬')>-1?'🎬':'🍅'}</span><div class="kb-main"><div class="kb-title">${r.type} ${r.minutes} 分钟</div><div class="kb-sub">${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')} 记录</div></div><span class="tag done">✓</span></div>`;}).join(''):'<div class="empty-tip">暂无学习记录，用番茄钟计时吧～</div>';
+ $('#focusList').innerHTML=list.length?list.map(r=>{const d=new Date(r.ts);return `<div class="kb-row"><span style="font-size:16px">${r.type.indexOf('🎬')>-1?'🎬':'🍅'}</span><div class="kb-main"><div class="kb-title">${esc(r.type)} ${r.minutes} 分钟</div><div class="kb-sub">${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')} 记录</div></div><span class="tag done">✓</span></div>`;}).join(''):'<div class="empty-tip">暂无学习记录，用番茄钟计时吧～</div>';
 }
 function renderFocusTasks(){
  const sel=$('#focusTask');if(!sel)return;
@@ -2151,7 +2151,7 @@ function renderBank(){
     if(i==='ABCD'.indexOf(userLetter)&&!right)x.classList.add('wrong');
    });
    let html;
-   const tag=('【'+q.subject+' · '+((q.point&&q.point!=='其他')?q.point:'选择题')+'】');
+   const tag=('【'+esc(q.subject)+' · '+((q.point&&q.point!=='其他')?esc(q.point):'选择题')+'】');
    if(right)html='✅ 回答正确！ '+tag+' 答案：'+qAns+'. '+esc(q.options[correctIdx]);
    else html='❌ 你的答案：'+userLetter+'. '+esc(q.options['ABCD'.indexOf(userLetter)]||'')+'　｜　正确答案：'+(qAns||'缺失')+'. '+esc(q.options[correctIdx]||'（原数据未记录答案）')+'　'+tag;
    $('#qAns').innerHTML=html+relatedKnowledgeHTML(q);
@@ -2215,7 +2215,7 @@ function wrongFlow(q){
  if(!q)return;
  openModal(`<div class="m-title">📌 加入错题库</div>
  <label class="lbl">原题</label><div class="soft-box">${esc(q.q)}</div>
- <label class="lbl">正确答案</label><div class="soft-box" style="color:#4E8A62">${q.type==='choice'?(q.answer+'. '+(q.options['ABCD'.indexOf(q.answer)]||'')):q.a}</div>
+ <label class="lbl">正确答案</label><div class="soft-box" style="color:#4E8A62">${q.type==='choice'?(esc(q.answer)+'. '+esc(q.options['ABCD'.indexOf(q.answer)]||'')):esc(q.a)}</div>
  <label class="lbl">错误原因</label><textarea class="inp" id="wReason" placeholder="为什么会答错？"></textarea>
  <label class="lbl">标准解题步骤</label><textarea class="inp" id="wSteps" placeholder="正确的解题思路…"></textarea>
  <label class="lbl">个人解题技巧</label><textarea class="inp" id="wTip" placeholder="下次怎么避免同类错误？"></textarea>
@@ -2287,7 +2287,7 @@ function showAiPreview(data,note){
  html+='</div>';
  html+='<div class="sub-title" style="margin-top:10px">📄 题目（'+qs.length+'）'+(qs.length?'<span class="hint">（默认全选，可剔除）</span>':'')+'</div>';
  html+='<div id="aiQList">';
- qs.forEach(function(q,i){html+='<div class="kb-row"><button class="btn sm ghost" data-qsel="'+i+'" style="flex:none">☑</button><div class="kb-main"><div class="kb-title">'+esc(q.q||'')+'</div><div class="kb-sub">'+esc(q.type==='choice'?('答案 '+(q.answer||'')+' · '+((q.options||[]).length)+' 选项'):('填空题 · 答案 '+esc(q.answer||'')))+'</div></div></div>';});
+ qs.forEach(function(q,i){html+='<div class="kb-row"><button class="btn sm ghost" data-qsel="'+i+'" style="flex:none">☑</button><div class="kb-main"><div class="kb-title">'+esc(q.q||'')+'</div><div class="kb-sub">'+esc(q.type==='choice'?('答案 '+esc(q.answer||'')+' · '+((q.options||[]).length)+' 选项'):('填空题 · 答案 '+esc(q.answer||'')))+'</div></div></div>';});
  html+='</div>';
  html+='<label class="hint" style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer"><input type="checkbox" id="aiSumChk" checked style="width:18px;height:18px;accent-color:#2F5D4C"> 并入后为每条知识点生成 AI 摘要（消耗模型额度）</label>';
  html+='<div id="aiSummary" class="soft-box" style="margin-top:8px;font-size:12.5px"></div>';
@@ -2330,7 +2330,7 @@ function renderWrong(){
  const wc=$('#wrongCnt');if(wc)wc.textContent=ws.length+' 题';
  const stat={};ws.forEach(w=>stat[w.subject]=(stat[w.subject]||0)+1);
  const top=Object.entries(stat).sort((a,b)=>b[1]-a[1])[0];
- $('#wrongWeekly').innerHTML=top?`📊 高频错题：<b>${top[0]}</b>（${top[1]} 题），建议重点专项突破。`:'📊 暂无错题记录，继续保持！';
+ $('#wrongWeekly').innerHTML=top?`📊 高频错题：<b>${esc(top[0])}</b>（${top[1]} 题），建议重点专项突破。`:'📊 暂无错题记录，继续保持！';
  $('#wrongList').innerHTML=ws.length?ws.map(w=>`<div class="rev-item">
    <div class="rev-head"><span class="rev-type">【${esc(w.subject)}】${esc(w.original)}</span></div>
    <div class="rev-text">✅ 正确答案：${esc(w.answer)}<br>💡 错误原因：${esc(w.reason||'—')}<br>📖 解题步骤：${esc(w.steps||'—')}<br>🎯 个人技巧：${esc(w.tip||'—')}</div>
@@ -2714,10 +2714,10 @@ function genPackage(){const now=new Date();const ym=now.getFullYear()+'年'+(now
 function renderReview(){
  $('#nextPlan').textContent=S.weeklyPlan||'本周复盘生成后，将自动生成下周学习优化方案。';
  $('#revList').innerHTML=S.reviews.length?S.reviews.map(r=>`<div class="rev-item">
-  <div class="rev-head"><span class="rev-type">${r.type}</span><span class="rev-date">${r.date}</span></div>
+  <div class="rev-head"><span class="rev-type">${esc(r.type)}</span><span class="rev-date">${r.date}</span></div>
   <div class="rev-text" style="white-space:pre-line">${esc(r.text)}</div>
   <div style="display:flex;gap:8px;margin-top:8px"><button class="btn sm ghost" data-vid="${r.id}">👁 查看</button><button class="btn sm danger" data-rdel="${r.id}">删除</button></div></div>`).join(''):'<div class="empty-tip">复盘文档将永久云端存档，可随时回看对比各阶段状态。</div>';
- $$('#revList [data-vid]').forEach(b=>b.onclick=()=>{const r=S.reviews.find(x=>x.id===b.dataset.vid);if(r)openModal(`<div class="m-title">${r.type} · ${r.date}</div><div class="soft-box" style="white-space:pre-line">${esc(r.text)}</div><div class="m-actions"><button class="btn primary" style="flex:1" id="revClose">关闭</button></div>`);$('#revClose').onclick=closeModal;});
+ $$('#revList [data-vid]').forEach(b=>b.onclick=()=>{const r=S.reviews.find(x=>x.id===b.dataset.vid);if(r)openModal(`<div class="m-title">${esc(r.type)} · ${r.date}</div><div class="soft-box" style="white-space:pre-line">${esc(r.text)}</div><div class="m-actions"><button class="btn primary" style="flex:1" id="revClose">关闭</button></div>`);$('#revClose').onclick=closeModal;});
  $$('#revList [data-rdel]').forEach(b=>b.onclick=()=>{S.reviews=S.reviews.filter(x=>x.id!==b.dataset.rdel);save();renderReview();toast('已删除该复盘存档');});
 }
 $('#genWeekly').onclick=genWeekly;
@@ -3181,11 +3181,47 @@ $$('.pc-nav-item').forEach(it=>{it.onclick=()=>{const p=it.dataset.page,pa=it.da
   const p4=$('#pcFlash');if(p4)p4.onclick=()=>showPage('flashcards');
 })();
 
+/* ================= 全局错误边界 ================= */
+window.addEventListener('error',function(e){
+  console.error('[全局错误]',e.message,e.error&&e.error.stack);
+  const app=$('#app');
+  if(app&&!app.querySelector('#errBanner')){
+    const banner=document.createElement('div');
+    banner.id='errBanner';
+    banner.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;background:#B96A56;color:#fff;padding:12px 16px;font-size:13px;line-height:1.5;box-shadow:0 2px 12px rgba(0,0,0,.2)';
+    banner.innerHTML='⚠️ 页面发生异常：'+esc(e.message||'未知错误')+'<br><span style="opacity:.8;font-size:12px">刷新页面通常可恢复。如反复出现，请导出数据后联系排查。</span>';
+    const btn=document.createElement('button');
+    btn.textContent='刷新页面';
+    btn.style.cssText='margin-top:8px;height:32px;padding:0 14px;border:none;border-radius:8px;background:#fff;color:#B96A56;font-weight:700;font-size:13px;cursor:pointer';
+    btn.onclick=()=>location.reload();
+    banner.appendChild(btn);
+    document.body.appendChild(banner);
+  }
+});
+window.addEventListener('unhandledrejection',function(e){
+  console.error('[未捕获Promise]',e.reason);
+});
 /* ================= 定时检查 / 初始化 ================= */
 setInterval(()=>{checkTodoRemind();renderTodo();},30000);
-function renderAll(){renderDate();renderQuote();renderCountdown();renderTasks();renderLogTiles();renderStats();renderReview();refreshRelief();
- /* 新增模块（独立于既有渲染，互不调用） */
- renderEb();renderMastery();renderPCRight();}
+function renderAll(){
+ try{renderDate();renderQuote();renderCountdown();}catch(e){console.error('renderDate',e);}
+ try{renderTasks();}catch(e){console.error('renderTasks',e);}
+ try{renderLogTiles();renderStats();}catch(e){console.error('renderStats',e);}
+ try{renderReview();refreshRelief();}catch(e){console.error('renderReview',e);}
+ try{renderEb();}catch(e){console.error('renderEb',e);}
+ try{renderMastery();}catch(e){console.error('renderMastery',e);}
+ try{renderPCRight();}catch(e){console.error('renderPCRight',e);}
+}
+/* 补漏：上次关闭页面时错过的周/月复盘，本次打开时补生成 */
+function catchUpReviews(){
+ const now=new Date();
+ const isSun=now.getDay()===0;
+ const lastDay=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+ /* 周复盘：如果本周日（含今天）还没有周复盘记录，且今天是周日或已过周日，则补生成 */
+ if(isSun&&!S.reviews.some(r=>r.type.indexOf('周复盘')>-1&&now.getTime()-new Date(r.date).getTime()<7*86400000))genWeekly();
+ /* 月度复盘：如果是月末最后一天且本月还没月度复盘，则生成 */
+ if(now.getDate()===lastDay&&!S.reviews.some(r=>r.type.indexOf('月度深度复盘')>-1&&r.date.startsWith(now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0'))))genMonthly();
+}
 (function init(){
  if(S.progress.date!==today()){S.progress.date=today();S.progress.baseDone=pointProgress().done;save();}
  /* 新增：给历史知识点/题目补 id，保证删除编辑可用 */
@@ -3198,10 +3234,7 @@ function renderAll(){renderDate();renderQuote();renderCountdown();renderTasks();
  renderAll();
  if(S.planner.plan.length)carryOver();
  save();
- const now=new Date();const isSun=now.getDay()===0;
- const lastDay=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
- if(isSun&&!S.reviews.some(r=>r.type.indexOf('周复盘')>-1&&(now.getTime()-new Date(r.date).getTime())<7*86400000))genWeekly();
- if(now.getDate()===lastDay&&!S.reviews.some(r=>r.type.indexOf('月度深度复盘')>-1&&r.date.startsWith(now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0'))))genMonthly();
+ catchUpReviews();
 })();
 </script>
 </body>
